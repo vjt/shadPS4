@@ -146,6 +146,7 @@ struct Info : InfoPersistent {
     bool uses_group_quad{};
     bool uses_group_shuffle{};
     bool uses_group_ballot{};
+    bool uses_group_arithmetic{};
     bool uses_fp16{};
     bool uses_fp64{};
     bool uses_pack_10_11_11{};
