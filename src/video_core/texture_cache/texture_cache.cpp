@@ -954,7 +954,11 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
 }
 
 void TextureCache::AssociateStencil(ImageId depth_id, const ImageInfo& depth_info) {
-    if (depth_info.stencil_addr == 0 || depth_info.stencil_addr == depth_info.guest_address) {
+    // A depth buffer can keep a stencil base address with its stencil format set to Invalid.
+    // Its stencil_size is then 0, so the lookup below can never find an existing image and a new
+    // zero-sized one would be created on every call until the image slots run out.
+    if (depth_info.stencil_addr == 0 || depth_info.stencil_addr == depth_info.guest_address ||
+        !depth_info.props.has_stencil || depth_info.stencil_size == 0) {
         return;
     }
     ImageId stencil_id{};
