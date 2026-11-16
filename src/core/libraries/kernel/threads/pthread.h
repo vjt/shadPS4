@@ -448,6 +448,9 @@ struct Pthread {
     }
 
     int SetAffinity(const Cpuset* cpuset);
+
+    // Diagnostics: mutex this thread is currently blocked on in PthreadMutex::Lock.
+    std::atomic<PthreadMutex*> diag_blocked_mutex{nullptr};
 };
 // fym static assertion expression is not an integral constant expression
 // static_assert(offsetof(Pthread, specific) == 0x1c8);

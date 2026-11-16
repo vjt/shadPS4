@@ -235,6 +235,9 @@ s32 PthreadMutex::Lock(const OrbisKernelTimespec* abstime, u64 usec) {
     }
 
     s32 ret = 0;
+    if (curthread != nullptr) {
+        curthread->diag_blocked_mutex.store(this, std::memory_order_relaxed);
+    }
     if (abstime == nullptr) {
         m_lock.lock();
     } else if (abstime != THR_RELTIME && (abstime->tv_nsec < 0 || abstime->tv_nsec >= 1000000000))
@@ -246,6 +249,9 @@ s32 PthreadMutex::Lock(const OrbisKernelTimespec* abstime, u64 usec) {
         } else {
             ret = m_lock.try_lock_until(abstime->TimePoint()) ? 0 : POSIX_ETIMEDOUT;
         }
+    }
+    if (curthread != nullptr) {
+        curthread->diag_blocked_mutex.store(nullptr, std::memory_order_relaxed);
     }
     if (ret == 0) {
         m_owner.store(curthread, std::memory_order_release);
