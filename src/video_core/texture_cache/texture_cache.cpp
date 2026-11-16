@@ -2,7 +2,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
+#include <cstdlib>
 #include <limits>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+#include <fmt/format.h>
 #include <xxhash.h>
 
 #include "common/assert.h"
@@ -30,6 +38,105 @@ static_assert(MAX_IMAGE_VIEWS == MAX_IMAGES);
 static constexpr u32 TRIGGER_GC_IMAGES = MAX_IMAGES * 3 / 4;
 static constexpr u32 PRESSURE_GC_IMAGES = MAX_IMAGES * 7 / 8;
 static constexpr u32 CRITICAL_GC_IMAGES = MAX_IMAGES * 15 / 16;
+
+// Diagnostic only, enabled by SHADPS4_IMG_DIAG: counts image creations per call site and per
+// guest address, and logs a summary every REPORT_EVERY creations. Used to find which path keeps
+// creating images when a title fills the image slots.
+namespace ImgDiag {
+enum Site : u32 {
+    FindNoCandidate,
+    FindOverlapNone,
+    FindExactFmt,
+    FindResolveFailed,
+    Expand,
+    DepthRecreate,
+    OverlapMerge,
+    Stencil,
+    NumSites,
+};
+static constexpr std::array<const char*, NumSites> SITE_NAMES = {
+    "find-no-candidate", "find-overlap-none", "find-exact-fmt", "find-resolve-failed",
+    "expand",            "depth-recreate",    "overlap-merge",  "stencil",
+};
+static constexpr u64 REPORT_EVERY = 2000;
+
+struct AddrStat {
+    u64 count{};
+    std::array<u64, NumSites> by_site{};
+    ImageInfo last{};
+    u32 binding{};
+    u32 candidates{};
+};
+
+static const bool enabled = std::getenv("SHADPS4_IMG_DIAG") != nullptr;
+static std::mutex mutex;
+static std::array<u64, NumSites> created{};
+static u64 total{};
+static u64 deleted{};
+static std::unordered_map<VAddr, AddrStat> per_addr;
+
+static void Report(size_t live) {
+    std::string sites;
+    for (u32 i = 0; i < NumSites; ++i) {
+        if (created[i]) {
+            sites += fmt::format(" {}={}", SITE_NAMES[i], created[i]);
+        }
+    }
+    LOG_WARNING(Render_Vulkan, "[imgdiag] created={} deleted={} live={} addrs={} |{}", total,
+                deleted, live, per_addr.size(), sites);
+    std::vector<std::pair<VAddr, const AddrStat*>> top;
+    top.reserve(per_addr.size());
+    for (const auto& [addr, stat] : per_addr) {
+        top.emplace_back(addr, &stat);
+    }
+    const size_t n = std::min<size_t>(top.size(), 8);
+    std::partial_sort(top.begin(), top.begin() + n, top.end(),
+                      [](const auto& a, const auto& b) { return a.second->count > b.second->count; });
+    for (size_t i = 0; i < n; ++i) {
+        const auto& [addr, s] = top[i];
+        std::string by;
+        for (u32 j = 0; j < NumSites; ++j) {
+            if (s->by_site[j]) {
+                by += fmt::format(" {}={}", SITE_NAMES[j], s->by_site[j]);
+            }
+        }
+        const auto& l = s->last;
+        LOG_WARNING(Render_Vulkan,
+                    "[imgdiag]   {:#x} x{} |{} | {}x{}x{} {} type={} tile={:#x} pitch={} bits={} "
+                    "levels={} layers={} gsize={:#x} binding={} candidates={}",
+                    addr, s->count, by, l.size.width, l.size.height, l.size.depth,
+                    vk::to_string(l.pixel_format), static_cast<int>(l.type),
+                    static_cast<u32>(l.tile_mode), l.pitch, l.num_bits, l.resources.levels,
+                    l.resources.layers, l.guest_size, s->binding, s->candidates);
+    }
+}
+
+static void Created(Site site, const ImageInfo& info, u32 binding, size_t candidates,
+                    size_t live) {
+    if (!enabled) {
+        return;
+    }
+    std::scoped_lock lk{mutex};
+    ++created[site];
+    auto& s = per_addr[info.guest_address];
+    ++s.count;
+    ++s.by_site[site];
+    s.last = info;
+    s.binding = binding;
+    s.candidates = static_cast<u32>(candidates);
+    if (++total % REPORT_EVERY == 0) {
+        Report(live);
+    }
+}
+
+static void Deleted() {
+    if (!enabled) {
+        return;
+    }
+    std::scoped_lock lk{mutex};
+    ++deleted;
+}
+} // namespace ImgDiag
 
 static u64 HashBackingMemory(VAddr virtual_addr, u64 size) {
     static constexpr std::array<u8, Core::GUEST_PAGE_SIZE> zeros{};
@@ -315,6 +422,8 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         new_info.UpdateSize();
         const auto new_image_id = slot_images.Insert(instance, runtime, slot_image_views, new_info);
         RegisterImage(new_image_id);
+        ImgDiag::Created(ImgDiag::DepthRecreate, new_info, static_cast<u32>(binding), 1,
+                         slot_images.Size());
 
         // Inherit image usage
         auto& new_image = slot_images[new_image_id];
@@ -564,6 +673,8 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
                     merged_image_id =
                         slot_images.Insert(instance, runtime, slot_image_views, image_info);
                     RegisterImage(merged_image_id);
+                    ImgDiag::Created(ImgDiag::OverlapMerge, image_info, static_cast<u32>(binding),
+                                     1, slot_images.Size());
                     RefreshImage(slot_images[merged_image_id]);
                     TrackImage(merged_image_id);
                 }
@@ -580,6 +691,7 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
 ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
     const auto new_image_id = slot_images.Insert(instance, runtime, slot_image_views, info);
     RegisterImage(new_image_id);
+    ImgDiag::Created(ImgDiag::Expand, info, 0, 1, slot_images.Size());
 
     auto& src_image = slot_images[image_id];
     auto& new_image = slot_images[new_image_id];
@@ -665,15 +777,18 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         }
     }
 
+    auto diag_site = image_ids.empty() ? ImgDiag::FindNoCandidate : ImgDiag::FindOverlapNone;
     if (image_id) {
         Image& image_resolved = slot_images[image_id];
         if (exact_fmt && info.pixel_format != image_resolved.info.pixel_format) {
             // Cannot reuse this image as we need the exact requested format.
             image_id = {};
+            diag_site = ImgDiag::FindExactFmt;
         } else if (!image_resolved.info.resources.Contains(info.resources)) {
             // The image was clearly picked up wrong.
             FreeImage(image_id);
             image_id = {};
+            diag_site = ImgDiag::FindResolveFailed;
             LOG_WARNING(Render_Vulkan, "Image overlap resolve failed");
         }
     }
@@ -681,6 +796,8 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     if (!image_id) {
         image_id = slot_images.Insert(instance, runtime, slot_image_views, info);
         RegisterImage(image_id);
+        ImgDiag::Created(diag_site, info, static_cast<u32>(desc.type), image_ids.size(),
+                         slot_images.Size());
     }
 
     Image& image = slot_images[image_id];
@@ -858,6 +975,8 @@ void TextureCache::AssociateStencil(ImageId depth_id, const ImageInfo& depth_inf
         info.size = depth_info.size;
         stencil_id = slot_images.Insert(instance, runtime, slot_image_views, info);
         RegisterImage(stencil_id);
+        ImgDiag::Created(ImgDiag::Stencil, info, static_cast<u32>(BindingType::DepthTarget), 0,
+                         slot_images.Size());
     }
     Image& stencil_image = slot_images[stencil_id];
     TouchImage(stencil_image);
@@ -1261,6 +1380,7 @@ void TextureCache::TouchImage(Image& image) {
 }
 
 void TextureCache::DeleteImage(ImageId image_id) {
+    ImgDiag::Deleted();
     Image& image = slot_images[image_id];
     ASSERT_MSG(image.IsUntracked(), "Image was not untracked");
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered), "Image was not unregistered");
