@@ -3,10 +3,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <string>
+#include <thread>
 #include <fmt/format.h>
 
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/posix_error.h"
 #include "core/libraries/kernel/threads/pthread.h"
@@ -17,6 +21,65 @@
 namespace Libraries::Kernel {
 
 static std::mutex CondStaticLock;
+
+// ---- Hang diagnostics (miles-hang-diag branch, not for upstream) ----
+// SHADPS4_HANG_DUMP=<seconds>: periodically log what every guest thread is blocked on.
+// SHADPS4_COND_TRACE=<substring>: log wait/wake/signal/broadcast on conds whose name matches
+// ("*" matches every cond).
+
+static const std::string& CondTraceFilter() {
+    static const std::string filter = [] {
+        const char* env = std::getenv("SHADPS4_COND_TRACE");
+        return std::string{env ? env : ""};
+    }();
+    return filter;
+}
+
+static bool CondTraced(const PthreadCond* cv) {
+    const auto& filter = CondTraceFilter();
+    if (filter.empty()) {
+        return false;
+    }
+    return filter == "*" || cv->name.find(filter) != std::string::npos;
+}
+
+static const char* ThreadName(const Pthread* td) {
+    return td != nullptr ? td->name.c_str() : "<host>";
+}
+
+static void HangDumpLoop(int period_s) {
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::seconds(period_s));
+        auto* ts = ThrState::Instance();
+        std::scoped_lock lk{ts->thread_list_lock};
+        LOG_WARNING(Kernel_Pthread, "[hangdump] ---- {} threads ----", ts->threads.size());
+        for (Pthread* td : ts->threads) {
+            std::string what;
+            if (const auto* cv = static_cast<const PthreadCond*>(td->wchan); cv != nullptr) {
+                what += fmt::format(" COND {} '{}' waiters={} (with mutex '{}')", fmt::ptr(cv),
+                                    cv->name, cv->has_user_waiters,
+                                    td->mutex_obj != nullptr ? td->mutex_obj->name : "");
+            }
+            if (const auto* bm = td->diag_blocked_mutex.load(std::memory_order_relaxed);
+                bm != nullptr) {
+                const Pthread* owner = bm->m_owner.load(std::memory_order_relaxed);
+                what += fmt::format(" MUTEX {} '{}' owner '{}' tid {}", fmt::ptr(bm), bm->name,
+                                    ThreadName(owner), owner != nullptr ? owner->tid.load() : 0);
+            }
+            LOG_WARNING(Kernel_Pthread, "[hangdump] tid {} '{}'{}", td->tid.load(), td->name,
+                        what.empty() ? " -" : what);
+        }
+    }
+}
+
+[[maybe_unused]] static const bool HangDumpStarted = [] {
+    if (const char* env = std::getenv("SHADPS4_HANG_DUMP"); env != nullptr) {
+        if (const int period = std::atoi(env); period > 0) {
+            std::thread(HangDumpLoop, period).detach();
+        }
+    }
+    return true;
+}();
 
 #define THR_COND_INITIALIZER ((PthreadCond*)nullptr)
 #define THR_COND_DESTROYED ((PthreadCond*)1)
@@ -130,6 +193,10 @@ int PthreadCond::Wait(PthreadMutexT* mutex, const OrbisKernelTimespec* abstime, 
 
     curthread->mutex_obj = mp;
     SleepqAdd(this, curthread);
+    if (CondTraced(this)) [[unlikely]] {
+        LOG_WARNING(Kernel_Pthread, "[condtrace] WAIT '{}' {} by '{}' mutex '{}' timed={}", name,
+                    fmt::ptr(this), curthread->name, mp->name, abstime != nullptr);
+    }
 
     const bool is_reltime = abstime == THR_RELTIME;
     auto reltime_deadline = std::chrono::steady_clock::time_point{};
@@ -202,6 +269,10 @@ int PthreadCond::Wait(PthreadMutexT* mutex, const OrbisKernelTimespec* abstime, 
     const int error2 = mp->CvLock(recurse);
     curthread->cancel_point = false;
     PthreadCancelInterrupt();
+    if (CondTraced(this)) [[unlikely]] {
+        LOG_WARNING(Kernel_Pthread, "[condtrace] WOKE '{}' {} by '{}' error={} relock={}", name,
+                    fmt::ptr(this), curthread->name, error, error2);
+    }
     if (error == 0) {
         error = error2;
     }
@@ -247,6 +318,10 @@ int PthreadCond::Signal(Pthread* thread) {
     SleepqLock(this);
     SleepQueue* sq = SleepqLookup(this);
     if (sq == nullptr) {
+        if (CondTraced(this)) [[unlikely]] {
+            LOG_WARNING(Kernel_Pthread, "[condtrace] SIGNAL '{}' {} by '{}' NO WAITERS", name,
+                        fmt::ptr(this), ThreadName(curthread));
+        }
         SleepqUnlock(this);
         return thread != nullptr ? 1 : 0;
     }
@@ -271,6 +346,10 @@ int PthreadCond::Signal(Pthread* thread) {
         td = sq->sq_blocked.front();
     }
 
+    if (CondTraced(this)) [[unlikely]] {
+        LOG_WARNING(Kernel_Pthread, "[condtrace] SIGNAL '{}' {} by '{}' wakes '{}'", name,
+                    fmt::ptr(this), ThreadName(curthread), td->name);
+    }
     PthreadMutex* mp = td->mutex_obj;
     has_user_waiters = SleepqRemove(sq, td);
 
@@ -326,6 +405,11 @@ int PthreadCond::Broadcast() {
 
     SleepqLock(this);
     SleepQueue* sq = SleepqLookup(this);
+    if (CondTraced(this)) [[unlikely]] {
+        LOG_WARNING(Kernel_Pthread, "[condtrace] BROADCAST '{}' {} by '{}' waiters={}", name,
+                    fmt::ptr(this), ThreadName(ba.curthread),
+                    sq != nullptr ? sq->sq_blocked.size() : 0);
+    }
     if (sq == nullptr) {
         SleepqUnlock(this);
         return 0;
