@@ -1100,7 +1100,7 @@ void TextureCache::GarbageCollectImages() {
     if (instance.CanReportMemoryUsage()) {
         total_used_memory = instance.GetDeviceMemoryUsage();
     }
-    const size_t used_image_slots = std::max(slot_images.Size(), slot_image_views.Size());
+    size_t used_image_slots = std::max(slot_images.Size(), slot_image_views.Size());
     if (total_used_memory < trigger_gc_memory && used_image_slots < TRIGGER_GC_IMAGES) {
         return;
     }
@@ -1135,6 +1135,7 @@ void TextureCache::GarbageCollectImages() {
             return false;
         }
         --num_deletions;
+        --used_image_slots;
         const auto image_id = slot_images.GetSlotId(image);
         if (download) {
             UntrackImage(image_id);
