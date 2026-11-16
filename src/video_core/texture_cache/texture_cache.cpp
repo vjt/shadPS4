@@ -26,6 +26,10 @@ namespace VideoCore {
 static constexpr u32 MAX_IMAGES = std::numeric_limits<u16>::max();
 static constexpr u32 MAX_IMAGE_VIEWS = std::numeric_limits<u16>::max();
 static constexpr u32 MAX_SAMPLERS = std::numeric_limits<u16>::max();
+static_assert(MAX_IMAGE_VIEWS == MAX_IMAGES);
+static constexpr u32 TRIGGER_GC_IMAGES = MAX_IMAGES * 3 / 4;
+static constexpr u32 PRESSURE_GC_IMAGES = MAX_IMAGES * 7 / 8;
+static constexpr u32 CRITICAL_GC_IMAGES = MAX_IMAGES * 15 / 16;
 
 static u64 HashBackingMemory(VAddr virtual_addr, u64 size) {
     static constexpr std::array<u8, Core::GUEST_PAGE_SIZE> zeros{};
@@ -1096,7 +1100,8 @@ void TextureCache::GarbageCollectImages() {
     if (instance.CanReportMemoryUsage()) {
         total_used_memory = instance.GetDeviceMemoryUsage();
     }
-    if (total_used_memory < trigger_gc_memory) {
+    const size_t used_image_slots = std::max(slot_images.Size(), slot_image_views.Size());
+    if (total_used_memory < trigger_gc_memory && used_image_slots < TRIGGER_GC_IMAGES) {
         return;
     }
     bool pressured = false;
@@ -1106,9 +1111,15 @@ void TextureCache::GarbageCollectImages() {
     boost::container::small_vector<ImageId, 8> download_queue;
     boost::container::small_vector<ImageId, 8> maybe_download;
 
+    const auto is_pressured = [&] {
+        return total_used_memory >= pressure_gc_memory || used_image_slots >= PRESSURE_GC_IMAGES;
+    };
+    const auto is_critical = [&] {
+        return total_used_memory >= critical_gc_memory || used_image_slots >= CRITICAL_GC_IMAGES;
+    };
     const auto configure = [&](bool allow_aggressive) {
-        pressured = total_used_memory >= pressure_gc_memory;
-        aggresive = allow_aggressive && total_used_memory >= critical_gc_memory;
+        pressured = is_pressured();
+        aggresive = allow_aggressive && is_critical();
         ticks_to_destroy = aggresive ? 160 : pressured ? 80 : 16;
         ticks_to_destroy = std::min(ticks_to_destroy, gc_tick);
         num_deletions = aggresive ? 40 : pressured ? 20 : 10;
@@ -1138,13 +1149,13 @@ void TextureCache::GarbageCollectImages() {
         } else {
             FreeImage(image_id);
         }
-        if (total_used_memory < critical_gc_memory) {
+        if (!is_critical()) {
             if (aggresive) {
                 num_deletions >>= 2;
                 aggresive = false;
                 return false;
             }
-            if (pressured && total_used_memory < pressure_gc_memory) {
+            if (pressured && !is_pressured()) {
                 num_deletions >>= 1;
                 pressured = false;
             }
@@ -1156,7 +1167,7 @@ void TextureCache::GarbageCollectImages() {
     configure(false);
     image_lru_cache.ForEachItemBelow(gc_tick - ticks_to_destroy, clean_up);
 
-    if (total_used_memory >= critical_gc_memory) {
+    if (is_critical()) {
         // If we are still over the critical limit, run an aggressive GC
         configure(true);
         image_lru_cache.ForEachItemBelow(gc_tick - ticks_to_destroy, clean_up);
