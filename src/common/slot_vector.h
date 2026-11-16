@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <limits>
 #include <numeric>
+#include <typeinfo>
 #include <utility>
 #include <vector>
 
@@ -128,7 +129,9 @@ private:
     }
 
     void AddChunk() noexcept {
-        ASSERT_MSG(!small_vector && num_chunks < max_chunks, "Run out of space");
+        ASSERT_MSG(!small_vector && num_chunks < max_chunks,
+                   "Run out of space in SlotVector<{}> with {} entries", typeid(T).name(),
+                   capacity);
         auto* const chunk_address = reinterpret_cast<u8*>(values) + num_chunks * CHUNK_SIZE;
         CommitMemoryPages(chunk_address, CHUNK_SIZE);
         ++num_chunks;
