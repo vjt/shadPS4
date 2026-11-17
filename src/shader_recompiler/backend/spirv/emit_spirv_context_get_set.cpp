@@ -247,8 +247,7 @@ Id EmitGetAttributeU32(EmitContext& ctx, IR::Attribute attr, u32 comp) {
     }
     case IR::Attribute::OffChipLdsBase:
         // DIAG: off-chip tessellation not implemented, read as 0 to get past emission
-        LOG_WARNING(Render_Recompiler, "[offchip] OffChipLdsBase read as 0 (stage {})",
-                    u32(ctx.stage));
+        LOG_WARNING(Render_Recompiler, "[offchip] OffChipLdsBase read as 0");
         return ctx.u32_zero_value;
     default:
         UNREACHABLE_MSG("Read U32 attribute {}", attr);
