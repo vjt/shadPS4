@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <cstdlib>
+#include <span>
 #include <optional>
 #include <unordered_map>
 #include "common/assert.h"
@@ -657,8 +659,87 @@ void DomainShaderTransform(const IR::Program& program, const RuntimeInfo& runtim
     }
 }
 
+// Off-chip tessellation (SPI_SHADER_PGM_RSRC2.OC_LDS_EN): the HS writes its outputs, and the DS
+// reads them, through a buffer addressed by the OffChipLdsBase SGPR instead of LDS. The offsets
+// follow the same layout as on-chip LDS, so lower these accesses to LDS ones and let the passes
+// below map them to tessellation attributes like any other.
+static void LowerOffChipBufferAccess(IR::Program& program) {
+    for (IR::Block* block : program.blocks) {
+        for (IR::Inst& inst : block->Instructions()) {
+            u32 num_dwords = 0;
+            bool is_store = false;
+            switch (inst.GetOpcode()) {
+            case IR::Opcode::StoreBufferU32x4:
+                ++num_dwords;
+                [[fallthrough]];
+            case IR::Opcode::StoreBufferU32x3:
+                ++num_dwords;
+                [[fallthrough]];
+            case IR::Opcode::StoreBufferU32x2:
+                ++num_dwords;
+                [[fallthrough]];
+            case IR::Opcode::StoreBufferU32:
+                ++num_dwords;
+                is_store = true;
+                break;
+            case IR::Opcode::LoadBufferU32x4:
+                ++num_dwords;
+                [[fallthrough]];
+            case IR::Opcode::LoadBufferU32x3:
+                ++num_dwords;
+                [[fallthrough]];
+            case IR::Opcode::LoadBufferU32x2:
+                ++num_dwords;
+                [[fallthrough]];
+            case IR::Opcode::LoadBufferU32:
+                ++num_dwords;
+                break;
+            default:
+                continue;
+            }
+            if (!M_GETATTRIBUTEU32(MatchAttribute(IR::Attribute::OffChipLdsBase), MatchIgnore())
+                     .Match(IR::GetBufferSOffsetArg(&inst))) {
+                continue;
+            }
+            const auto buf_info = inst.Flags<IR::BufferInstInfo>();
+            ASSERT_MSG(!buf_info.index_enable, "Indexed off-chip tessellation access");
+
+            IR::IREmitter ir{*block, IR::Block::InstructionList::s_iterator_to(inst)};
+            IR::U32 addr =
+                buf_info.voffset_enable ? IR::GetBufferVOffsetArg(&inst) : ir.Imm32(0u);
+            if (const u32 inst_offset = buf_info.inst_offset.Value(); inst_offset != 0) {
+                addr = ir.IAdd(addr, ir.Imm32(inst_offset));
+            }
+            const auto dword_addr = [&](u32 i) {
+                return i == 0 ? addr : IR::U32{ir.IAdd(addr, ir.Imm32(i * 4))};
+            };
+
+            if (is_store) {
+                const IR::Value data = inst.Arg(IR::StoreBufferArgs::Data);
+                for (u32 i = 0; i < num_dwords; i++) {
+                    const IR::Value value = num_dwords == 1 ? data : ir.CompositeExtract(data, i);
+                    ir.WriteShared(32, value, dword_addr(i));
+                }
+                inst.Invalidate();
+            } else {
+                std::array<IR::Value, 4> values;
+                for (u32 i = 0; i < num_dwords; i++) {
+                    values[i] = ir.LoadShared(32, false, dword_addr(i));
+                }
+                const IR::Value result =
+                    num_dwords == 1
+                        ? values[0]
+                        : ir.CompositeConstruct(std::span<const IR::Value>{values.data(), num_dwords});
+                inst.ReplaceUsesWithAndRemove(result);
+            }
+        }
+    }
+}
+
 // Run before either hull or domain transform
 void TessellationPreprocess(IR::Program& program, RuntimeInfo& runtime_info) {
+    LowerOffChipBufferAccess(program);
+
     TessellationDataConstantBuffer tess_constants;
     Shader::Info& info = program.info;
     // Find the TessellationDataConstantBuffer V#
