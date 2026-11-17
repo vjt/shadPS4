@@ -266,12 +266,17 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
     // at the exact position rather than append
 
     vk::ShaderModule module{};
+    // The loaded meta describes this permutation's resources. A program created by this load
+    // keeps them as its own info; an existing one holds another permutation's there.
+    std::unique_ptr<Shader::Info> perm_info{};
 
     auto [it_pgm, new_program] = program_cache.try_emplace(program->info.pgm_hash);
     if (new_program) {
         module = CompileSPV(spv, instance.GetDevice());
         it_pgm.value() = std::move(program);
     } else {
+        perm_info = std::make_unique<Shader::Info>(program->info);
+        spec.info = perm_info.get();
         const auto& it = std::ranges::find(it_pgm.value()->modules, spec, &Program::Module::spec);
         if (it != it_pgm.value()->modules.end()) {
             // A matching permutation is valid only at its original index. A different index means
@@ -290,9 +295,9 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
             module = CompileSPV(spv, instance.GetDevice());
         }
     }
-    it_pgm.value()->InsertPermut(module, std::move(spec), perm_idx);
+    it_pgm.value()->InsertPermut(module, std::move(spec), perm_idx, std::move(perm_info));
 
-    infos[stage] = &it_pgm.value()->info;
+    infos[stage] = &it_pgm.value()->PermInfo(perm_idx);
     modules[stage] = module;
     if (auto& fetch = it_pgm.value()->modules[perm_idx].spec.fetch_shader_data; !fetch.Empty()) {
         fetch_shader = &fetch;

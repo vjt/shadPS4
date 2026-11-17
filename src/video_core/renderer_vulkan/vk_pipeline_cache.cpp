@@ -785,35 +785,41 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
 
     const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
     if (it == program->modules.end()) {
-        auto new_info = Shader::Info(hw_stage, sw_stage, params);
+        auto new_info = std::make_unique<Shader::Info>(hw_stage, sw_stage, params);
         const auto start = binding;
-        module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
+        module = CompileModule(*new_info, runtime_info, params.code, perm_idx, binding);
         {
             const auto actual = PermDiag::Sub(binding, start);
             PermDiag::deltas[perm_hash] = actual;
             const auto c = PermDiag::Count(info);
-            const auto f = PermDiag::Count(new_info);
+            const auto f = PermDiag::Count(*new_info);
             if ((actual.unified != c.b + c.i + c.s || f.b != c.b || f.i != c.i || f.s != c.s) &&
                 PermDiag::Once(perm_hash ^ 2)) {
                 PermDiag::Log("new-perm", params.hash, perm_idx, start, actual, c, &f);
             }
         }
 
-        RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
-        program->AddPermut(module, std::move(spec));
+        RegisterShaderMeta(*new_info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
+        program->AddPermut(module, std::move(spec), std::move(new_info));
     } else {
         const auto start = binding;
-        info.AddBindings(binding);
-        module = it->module;
         perm_idx = std::distance(program->modules.begin(), it);
         perm_hash = HashCombine(params.hash, perm_idx);
+        auto& perm_info = program->PermInfo(perm_idx);
+        if (&perm_info != &info) {
+            perm_info.pgm_base = params.Base();
+            perm_info.user_data = params.user_data;
+            perm_info.RefreshFlatBuf();
+        }
+        perm_info.AddBindings(binding);
+        module = it->module;
         {
             const auto applied = PermDiag::Sub(binding, start);
             const auto d = PermDiag::deltas.find(perm_hash);
             if (d == PermDiag::deltas.end()) {
                 if (PermDiag::Once(perm_hash ^ 3)) {
                     PermDiag::Log("cached-nodelta", params.hash, perm_idx, start, applied,
-                                  PermDiag::Count(info), nullptr);
+                                  PermDiag::Count(perm_info), nullptr);
                 }
             } else if (d->second != applied && PermDiag::Once(perm_hash ^ 4)) {
                 LOG_WARNING(Render_Vulkan,
@@ -827,7 +833,7 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     if (auto& fetch = program->modules[perm_idx].spec.fetch_shader_data; !fetch.Empty()) {
         fetch_shader = &fetch;
     }
-    return std::make_tuple(&program->info, module, perm_hash);
+    return std::make_tuple(&program->PermInfo(perm_idx), module, perm_hash);
 }
 
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <memory>
 #include <variant>
 #include <tsl/robin_map.h>
 #include "shader_recompiler/profile.h"
@@ -42,6 +43,11 @@ struct Program {
     struct Module {
         vk::ShaderModule module;
         Shader::StageSpecialization spec;
+        // Resources of this permutation when they are not the ones in Program::info. Each
+        // permutation is recompiled, and constant folding or dead code elimination can leave it
+        // with a different set of buffers, images or samplers. Heap allocated so that the pointer
+        // handed out to pipelines survives a reallocation of the module list.
+        std::unique_ptr<Shader::Info> info{};
     };
     static constexpr size_t MaxPermutations = 8;
     using ModuleList = boost::container::small_vector<Module, MaxPermutations>;
@@ -53,14 +59,20 @@ struct Program {
     Program(Shader::HwStage stage, Shader::SwStage l_stage, Shader::ShaderParams params)
         : info{stage, l_stage, params} {}
 
-    void AddPermut(vk::ShaderModule module, Shader::StageSpecialization&& spec) {
-        modules.emplace_back(module, std::move(spec));
+    Shader::Info& PermInfo(size_t perm_idx) {
+        auto& perm_info = modules[perm_idx].info;
+        return perm_info ? *perm_info : info;
+    }
+
+    void AddPermut(vk::ShaderModule module, Shader::StageSpecialization&& spec,
+                   std::unique_ptr<Shader::Info> perm_info = {}) {
+        modules.emplace_back(module, std::move(spec), std::move(perm_info));
     }
 
     void InsertPermut(vk::ShaderModule module, Shader::StageSpecialization&& spec,
-                      size_t perm_idx) {
+                      size_t perm_idx, std::unique_ptr<Shader::Info> perm_info = {}) {
         modules.resize(std::max(modules.size(), perm_idx + 1)); // <-- beware of realloc
-        modules[perm_idx] = {module, std::move(spec)};
+        modules[perm_idx] = {module, std::move(spec), std::move(perm_info)};
     }
 };
 
