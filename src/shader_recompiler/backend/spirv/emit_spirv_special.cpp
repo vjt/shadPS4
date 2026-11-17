@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/ir/debug_print.h"
@@ -80,11 +81,20 @@ void EmitEpilogue(EmitContext& ctx) {
     }
 }
 
+// Diagnostic only: SHADPS4_NO_KILL drops every pixel shader discard.
+static const bool no_kill = std::getenv("SHADPS4_NO_KILL") != nullptr;
+
 void EmitDiscard(EmitContext& ctx) {
+    if (no_kill) {
+        return;
+    }
     ctx.OpDemoteToHelperInvocationEXT();
 }
 
 void EmitDiscardCond(EmitContext& ctx, Id condition) {
+    if (no_kill) {
+        return;
+    }
     const Id kill_label{ctx.OpLabel()};
     const Id merge_label{ctx.OpLabel()};
     ctx.OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);

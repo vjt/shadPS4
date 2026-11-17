@@ -53,6 +53,7 @@ struct RtStat {
     u64 count{};
     std::array<u64, NumOutcomes> by_outcome{};
     u64 mask0{}, vp0{}, sc0{}, nidx0{}, ninst0{}, cb_off{}, indirect{};
+    u64 rkill{}, dtest{}, stest{}, cull{}, clipoff{};
     u32 last_mode{}, last_rop3{}, last_target{}, last_shader{}, last_mrt{};
     u32 last_blend_en{}, last_src{}, last_dst{}, last_func{};
     u32 last_sc_w{}, last_sc_h{}, last_nidx{}, last_ninst{};
@@ -81,12 +82,14 @@ static void Report() {
         const auto& s = *top[i].second;
         LOG_WARNING(Render_Vulkan,
                     "[drawdiag]  rt={:#x} n={} filt={} nopipe={} bindfail={} drawn={} | mask0={} "
-                    "vp0={} sc0={} nidx0={} ninst0={} cboff={} indirect={} | last: mode={} "
+                    "vp0={} sc0={} nidx0={} ninst0={} cboff={} indirect={} rkill={} dtest={} "
+                    "stest={} cull={} clipoff={} | last: mode={} "
                     "rop3={:#x} tmask={:#x} smask={:#x} mrt={:#x} blend={} src={} dst={} func={} "
                     "sc={}x{} vp={}x{} nidx={} ninst={}",
                     top[i].first, s.count, s.by_outcome[Filtered], s.by_outcome[NoPipeline],
                     s.by_outcome[BindFailed], s.by_outcome[Drawn], s.mask0, s.vp0, s.sc0, s.nidx0,
-                    s.ninst0, s.cb_off, s.indirect, s.last_mode, s.last_rop3, s.last_target,
+                    s.ninst0, s.cb_off, s.indirect, s.rkill, s.dtest, s.stest, s.cull, s.clipoff,
+                    s.last_mode, s.last_rop3, s.last_target,
                     s.last_shader, s.last_mrt, s.last_blend_en, s.last_src, s.last_dst,
                     s.last_func, s.last_sc_w, s.last_sc_h, s.last_xs, s.last_ys, s.last_nidx,
                     s.last_ninst);
@@ -117,6 +120,11 @@ static void Note(const AmdGpu::Regs& regs, Outcome outcome, u32 mrt_mask, bool i
         s.ninst0 += (!is_indirect && regs.num_instances.NumInstances() == 0);
         s.cb_off += (regs.color_control.mode == AmdGpu::ColorControl::OperationMode::Disable);
         s.indirect += is_indirect;
+        s.rkill += regs.clipper_control.dx_rasterization_kill;
+        s.dtest += (regs.depth_control.depth_enable && regs.depth_buffer.DepthValid());
+        s.stest += (regs.depth_control.stencil_enable && regs.depth_buffer.StencilValid());
+        s.cull += (regs.polygon_control.CullingMode() != AmdGpu::CullMode::None);
+        s.clipoff += regs.IsClipDisabled();
         s.last_rop3 = static_cast<u32>(regs.color_control.rop3);
         s.last_target = regs.color_target_mask.raw;
         s.last_shader = regs.color_shader_mask.raw;
@@ -1604,8 +1612,10 @@ void Rasterizer::UpdateDepthStencilState() const {
     const auto& regs = liverpool->regs;
     auto& dynamic_state = scheduler.GetDynamicState();
 
+    // Diagnostic only: SHADPS4_NO_DS forces depth, depth bounds and stencil tests off.
+    static const bool no_ds = std::getenv("SHADPS4_NO_DS") != nullptr;
     const auto depth_test_enabled =
-        regs.depth_control.depth_enable && regs.depth_buffer.DepthValid();
+        !no_ds && regs.depth_control.depth_enable && regs.depth_buffer.DepthValid();
     dynamic_state.SetDepthTestEnabled(depth_test_enabled);
     if (depth_test_enabled) {
         dynamic_state.SetDepthWriteEnabled(regs.depth_control.depth_write_enable &&
@@ -1613,7 +1623,7 @@ void Rasterizer::UpdateDepthStencilState() const {
         dynamic_state.SetDepthCompareOp(LiverpoolToVK::CompareOp(regs.depth_control.depth_func));
     }
 
-    const auto depth_bounds_test_enabled = regs.depth_control.depth_bounds_enable;
+    const auto depth_bounds_test_enabled = !no_ds && regs.depth_control.depth_bounds_enable;
     dynamic_state.SetDepthBoundsTestEnabled(depth_bounds_test_enabled);
     if (depth_bounds_test_enabled) {
         dynamic_state.SetDepthBounds(regs.depth_bounds_min, regs.depth_bounds_max);
@@ -1630,7 +1640,7 @@ void Rasterizer::UpdateDepthStencilState() const {
     }
 
     const auto stencil_test_enabled =
-        regs.depth_control.stencil_enable && regs.depth_buffer.StencilValid();
+        !no_ds && regs.depth_control.stencil_enable && regs.depth_buffer.StencilValid();
     dynamic_state.SetStencilTestEnabled(stencil_test_enabled);
     if (stencil_test_enabled) {
         const StencilOps front_ops{
@@ -1710,13 +1720,17 @@ void Rasterizer::UpdatePrimitiveState(const bool is_indexed) const {
                    regs.primitive_restart_index == 0xFFFFFFFF,
                "Primitive restart index other than -1 is not supported yet");
 
-    const auto cull_mode = LiverpoolToVK::IsPrimitiveCulled(regs.primitive_type)
+    // Diagnostic only: SHADPS4_NO_CULL / SHADPS4_NO_RKILL force culling / rasterizer discard off.
+    static const bool no_cull = std::getenv("SHADPS4_NO_CULL") != nullptr;
+    static const bool no_rkill = std::getenv("SHADPS4_NO_RKILL") != nullptr;
+    const auto cull_mode = !no_cull && LiverpoolToVK::IsPrimitiveCulled(regs.primitive_type)
                                ? LiverpoolToVK::CullMode(regs.polygon_control.CullingMode())
                                : vk::CullModeFlagBits::eNone;
     const auto front_face = LiverpoolToVK::FrontFace(regs.polygon_control.front_face);
 
     dynamic_state.SetPrimitiveRestartEnabled(prim_restart);
-    dynamic_state.SetRasterizerDiscardEnabled(regs.clipper_control.dx_rasterization_kill);
+    dynamic_state.SetRasterizerDiscardEnabled(!no_rkill &&
+                                              regs.clipper_control.dx_rasterization_kill);
     dynamic_state.SetCullMode(cull_mode);
     dynamic_state.SetFrontFace(front_face);
 }
