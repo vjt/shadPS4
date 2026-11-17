@@ -79,6 +79,25 @@ void EmitEpilogue(EmitContext& ctx) {
     if (ctx.hw_stage == HwStage::Vertex && ctx.runtime_info.hw.vs.clip_disable) {
         ConvertPositionToClipSpace(ctx);
     }
+    // Diagnostic only: SHADPS4_VS_FULLSCREEN replaces every vertex position with a full-screen
+    // triangle corner picked by VertexIndex % 3, to tell "geometry never covers the target" apart
+    // from "fragments are written somewhere else".
+    static const bool fullscreen = std::getenv("SHADPS4_VS_FULLSCREEN") != nullptr;
+    if (fullscreen && ctx.hw_stage == HwStage::Vertex && ctx.sw_stage == SwStage::Vertex) {
+        const Id f32{ctx.F32[1]};
+        const Id idx{ctx.OpUMod(ctx.U32[1], ctx.OpLoad(ctx.U32[1], ctx.vertex_index),
+                                ctx.ConstU32(3u))};
+        const Id three{ctx.Constant(f32, 3.f)};
+        const Id minus_one{ctx.Constant(f32, -1.f)};
+        const Id x{ctx.OpSelect(f32, ctx.OpIEqual(ctx.U1[1], idx, ctx.ConstU32(1u)), three,
+                                minus_one)};
+        const Id y{ctx.OpSelect(f32, ctx.OpIEqual(ctx.U1[1], idx, ctx.ConstU32(2u)), three,
+                                minus_one)};
+        ctx.OpStore(ctx.output_position,
+                    ctx.OpCompositeConstruct(ctx.F32[4], std::array<Id, 4>({x, y,
+                                                                            ctx.Constant(f32, 0.5f),
+                                                                            ctx.Constant(f32, 1.f)})));
+    }
 }
 
 // Diagnostic only: SHADPS4_NO_KILL drops every pixel shader discard.
