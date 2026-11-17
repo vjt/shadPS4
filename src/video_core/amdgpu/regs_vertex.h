@@ -100,6 +100,12 @@ union ShaderStageEnable {
         u32 dynamic_hs : 1;
     };
 
+    /// Stage configuration without the control bits above VS_EN (e.g. DYNAMIC_HS), so that
+    /// a tessellation pipeline with DYNAMIC_HS set (0x145) still matches LsHs (0x45).
+    VgtStages Stages() const {
+        return static_cast<VgtStages>(static_cast<u32>(raw) & 0xFFu);
+    }
+
     bool IsStageEnabled(u32 stage) const {
         switch (stage) {
         case 0:
