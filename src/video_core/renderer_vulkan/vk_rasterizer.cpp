@@ -20,6 +20,13 @@
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
 
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
 #include <vulkan/vulkan_format_traits.hpp>
 
 namespace Vulkan {
@@ -34,6 +41,105 @@ static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     push_data.yscale = regs.viewport_control.yscale_enable ? regs.viewports[0].yscale : 1.f;
     return push_data;
 }
+
+// Diagnostic only, enabled by SHADPS4_DRAW_DIAG: counts what happens to every draw, keyed by the
+// address of colour buffer 0, and logs a summary every 2 seconds. Used to find why a title's render
+// targets stay all zero although it issues draws.
+namespace DrawDiag {
+enum Outcome : u32 { Filtered, NoPipeline, BindFailed, Drawn, NumOutcomes };
+static constexpr std::array<const char*, NumOutcomes> OUTCOME_NAMES = {"filtered", "no_pipeline",
+                                                                       "bind_failed", "drawn"};
+struct RtStat {
+    u64 count{};
+    std::array<u64, NumOutcomes> by_outcome{};
+    u64 mask0{}, vp0{}, sc0{}, nidx0{}, ninst0{}, cb_off{}, indirect{};
+    u32 last_mode{}, last_rop3{}, last_target{}, last_shader{}, last_mrt{};
+    u32 last_blend_en{}, last_src{}, last_dst{}, last_func{};
+    u32 last_sc_w{}, last_sc_h{}, last_nidx{}, last_ninst{};
+    float last_xs{}, last_ys{};
+};
+static const bool enabled = std::getenv("SHADPS4_DRAW_DIAG") != nullptr;
+static std::mutex mutex;
+static std::unordered_map<VAddr, RtStat> per_rt;
+static std::array<u64, NumOutcomes> totals{};
+static auto last_report = std::chrono::steady_clock::now();
+
+static void Report() {
+    std::string outcomes;
+    for (u32 i = 0; i < NumOutcomes; ++i) {
+        outcomes += fmt::format(" {}={}", OUTCOME_NAMES[i], totals[i]);
+    }
+    LOG_WARNING(Render_Vulkan, "[drawdiag] rts={} |{}", per_rt.size(), outcomes);
+    std::vector<std::pair<VAddr, const RtStat*>> top;
+    top.reserve(per_rt.size());
+    for (const auto& [addr, stat] : per_rt) {
+        top.emplace_back(addr, &stat);
+    }
+    std::sort(top.begin(), top.end(),
+              [](const auto& a, const auto& b) { return a.second->count > b.second->count; });
+    for (size_t i = 0; i < std::min<size_t>(top.size(), 12); ++i) {
+        const auto& s = *top[i].second;
+        LOG_WARNING(Render_Vulkan,
+                    "[drawdiag]  rt={:#x} n={} filt={} nopipe={} bindfail={} drawn={} | mask0={} "
+                    "vp0={} sc0={} nidx0={} ninst0={} cboff={} indirect={} | last: mode={} "
+                    "rop3={:#x} tmask={:#x} smask={:#x} mrt={:#x} blend={} src={} dst={} func={} "
+                    "sc={}x{} vp={}x{} nidx={} ninst={}",
+                    top[i].first, s.count, s.by_outcome[Filtered], s.by_outcome[NoPipeline],
+                    s.by_outcome[BindFailed], s.by_outcome[Drawn], s.mask0, s.vp0, s.sc0, s.nidx0,
+                    s.ninst0, s.cb_off, s.indirect, s.last_mode, s.last_rop3, s.last_target,
+                    s.last_shader, s.last_mrt, s.last_blend_en, s.last_src, s.last_dst,
+                    s.last_func, s.last_sc_w, s.last_sc_h, s.last_xs, s.last_ys, s.last_nidx,
+                    s.last_ninst);
+    }
+    per_rt.clear();
+    totals = {};
+}
+
+static void Note(const AmdGpu::Regs& regs, Outcome outcome, u32 mrt_mask, bool is_indirect) {
+    if (!enabled) {
+        return;
+    }
+    std::scoped_lock lk{mutex};
+    const auto& cb = regs.color_buffers[0];
+    auto& s = per_rt[cb ? cb.Address() : 0];
+    ++s.count;
+    ++s.by_outcome[outcome];
+    ++totals[outcome];
+    if (outcome == Drawn) {
+        const auto scissor = regs.GetCombinedScissor();
+        const u32 target = regs.color_target_mask.GetMask(0) & regs.color_shader_mask.GetMask(0);
+        const auto& vp = regs.viewports[0];
+        const auto& blend = regs.blend_control[0];
+        s.mask0 += (target == 0 || (mrt_mask & 1) == 0);
+        s.vp0 += (vp.xscale == 0.f || vp.yscale == 0.f);
+        s.sc0 += (scissor.GetWidth() == 0 || scissor.GetHeight() == 0);
+        s.nidx0 += (!is_indirect && regs.num_indices == 0);
+        s.ninst0 += (!is_indirect && regs.num_instances.NumInstances() == 0);
+        s.cb_off += (regs.color_control.mode == AmdGpu::ColorControl::OperationMode::Disable);
+        s.indirect += is_indirect;
+        s.last_rop3 = static_cast<u32>(regs.color_control.rop3);
+        s.last_target = regs.color_target_mask.raw;
+        s.last_shader = regs.color_shader_mask.raw;
+        s.last_mrt = mrt_mask;
+        s.last_blend_en = blend.enable;
+        s.last_src = static_cast<u32>(blend.color_src_factor);
+        s.last_dst = static_cast<u32>(blend.color_dst_factor);
+        s.last_func = static_cast<u32>(blend.color_func);
+        s.last_sc_w = scissor.GetWidth();
+        s.last_sc_h = scissor.GetHeight();
+        s.last_xs = vp.xscale;
+        s.last_ys = vp.yscale;
+        s.last_nidx = regs.num_indices;
+        s.last_ninst = regs.num_instances.NumInstances();
+    }
+    s.last_mode = static_cast<u32>(regs.color_control.mode);
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_report >= std::chrono::seconds(2)) {
+        last_report = now;
+        Report();
+    }
+}
+} // namespace DrawDiag
 
 Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime& runtime_,
                        AmdGpu::Liverpool* liverpool_)
@@ -191,20 +297,24 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     FlushPeriodically();
     scheduler.PopPendingOperations();
 
+    const auto& regs = liverpool->regs;
     if (!FilterDraw()) {
+        DrawDiag::Note(regs, DrawDiag::Filtered, 0, false);
         return;
     }
 
-    const auto& regs = liverpool->regs;
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
     if (!pipeline) {
+        DrawDiag::Note(regs, DrawDiag::NoPipeline, 0, false);
         return;
     }
 
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
+        DrawDiag::Note(regs, DrawDiag::BindFailed, pipeline->GetGraphicsKey().mrt_mask, false);
         return;
     }
+    DrawDiag::Note(regs, DrawDiag::Drawn, pipeline->GetGraphicsKey().mrt_mask, false);
     const auto state = BeginRendering(pipeline);
 
     BindVertexBuffers(pipeline);
@@ -248,6 +358,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     scheduler.PopPendingOperations();
 
     if (!FilterDraw()) {
+        DrawDiag::Note(liverpool->regs, DrawDiag::Filtered, 0, true);
         return;
     }
 
@@ -258,13 +369,17 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     };
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline(params);
     if (!pipeline) {
+        DrawDiag::Note(liverpool->regs, DrawDiag::NoPipeline, 0, true);
         return;
     }
 
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
+        DrawDiag::Note(liverpool->regs, DrawDiag::BindFailed, pipeline->GetGraphicsKey().mrt_mask,
+                       true);
         return;
     }
+    DrawDiag::Note(liverpool->regs, DrawDiag::Drawn, pipeline->GetGraphicsKey().mrt_mask, true);
     const auto state = BeginRendering(pipeline);
 
     BindVertexBuffers(pipeline);
