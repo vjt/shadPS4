@@ -101,6 +101,7 @@ struct PthreadMutex {
 
     int TryLock();
     int Lock(const OrbisKernelTimespec* abstime, u64 usec = 0);
+    int LockImpl(const OrbisKernelTimespec* abstime, u64 usec);
 
     int CvLock(int recurse) {
         const int error = Lock(nullptr);

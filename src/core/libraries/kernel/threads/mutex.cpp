@@ -1,11 +1,17 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <cstdlib>
+#include <map>
+#include <string>
 #include <thread>
+#include <unordered_map>
 #include <fmt/format.h>
 
 #include "common/arch.h"
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "common/types.h"
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/posix_error.h"
@@ -16,6 +22,97 @@ namespace Libraries::Kernel {
 
 static constexpr u32 MUTEX_ADAPTIVE_SPINS = 2000;
 static std::mutex MutxStaticLock;
+
+// ---- Mutex diagnostics (lb3-work branch, not for upstream) ----
+// SHADPS4_MUTEX_TRACE=<name>: for the mutexes with exactly this name ("*" = all), count per thread
+// how often each one is acquired, how long the thread waited for it and how long it held it.
+// A summary is logged every 2 s, and every single wait longer than 200 ms is logged on its own.
+namespace MutexTrace {
+using Clock = std::chrono::steady_clock;
+
+struct ThreadStat {
+    u64 acquired{};
+    u64 wait_us{};
+    u64 max_wait_us{};
+    u64 hold_us{};
+    u64 max_hold_us{};
+};
+
+struct MutexStat {
+    Clock::time_point held_since{};
+    std::map<std::string, ThreadStat> threads;
+};
+
+static const std::string& Filter() {
+    static const std::string filter = [] {
+        const char* env = std::getenv("SHADPS4_MUTEX_TRACE");
+        return std::string{env ? env : ""};
+    }();
+    return filter;
+}
+
+static bool Traced(const PthreadMutex* m) {
+    const auto& filter = Filter();
+    return !filter.empty() && (filter == "*" || m->name == filter);
+}
+
+static std::mutex lock;
+static std::unordered_map<const PthreadMutex*, MutexStat> stats;
+static Clock::time_point last_report = Clock::now();
+
+static const char* Name(const Pthread* td) {
+    return td != nullptr ? td->name.c_str() : "<host>";
+}
+
+static u64 Us(Clock::duration d) {
+    return std::chrono::duration_cast<std::chrono::microseconds>(d).count();
+}
+
+static void ReportLocked(Clock::time_point now) {
+    if (now - last_report < std::chrono::seconds(2)) {
+        return;
+    }
+    last_report = now;
+    for (auto& [m, ms] : stats) {
+        for (auto& [thread, s] : ms.threads) {
+            LOG_WARNING(Kernel_Pthread,
+                        "[mutextrace] '{}' {} acquired={} wait={}ms max_wait={}ms hold={}ms "
+                        "max_hold={}ms",
+                        m->name, thread, s.acquired, s.wait_us / 1000, s.max_wait_us / 1000,
+                        s.hold_us / 1000, s.max_hold_us / 1000);
+            s = {};
+        }
+    }
+}
+
+static void Acquired(const PthreadMutex* m, const Pthread* td, Clock::time_point wait_start) {
+    const auto now = Clock::now();
+    const u64 waited = Us(now - wait_start);
+    std::scoped_lock lk{lock};
+    auto& ms = stats[m];
+    ms.held_since = now;
+    auto& s = ms.threads[Name(td)];
+    ++s.acquired;
+    s.wait_us += waited;
+    s.max_wait_us = std::max(s.max_wait_us, waited);
+    if (waited > 200'000) {
+        LOG_WARNING(Kernel_Pthread, "[mutextrace] '{}' {} waited {}ms", m->name, Name(td),
+                    waited / 1000);
+    }
+    ReportLocked(now);
+}
+
+static void Released(const PthreadMutex* m, const Pthread* td) {
+    const auto now = Clock::now();
+    std::scoped_lock lk{lock};
+    auto& ms = stats[m];
+    const u64 held = Us(now - ms.held_since);
+    auto& s = ms.threads[Name(td)];
+    s.hold_us += held;
+    s.max_hold_us = std::max(s.max_hold_us, held);
+    ReportLocked(now);
+}
+} // namespace MutexTrace
 
 #define THR_MUTEX_INITIALIZER ((PthreadMutex*)NULL)
 #define THR_ADAPTIVE_MUTEX_INITIALIZER ((PthreadMutex*)1)
@@ -203,6 +300,19 @@ s32 PthreadMutex::SelfLock(const OrbisKernelTimespec* abstime, u64 usec) {
 }
 
 s32 PthreadMutex::Lock(const OrbisKernelTimespec* abstime, u64 usec) {
+    if (MutexTrace::Traced(this) && m_owner.load(std::memory_order_acquire) != g_curthread)
+        [[unlikely]] {
+        const auto wait_start = MutexTrace::Clock::now();
+        const s32 ret = LockImpl(abstime, usec);
+        if (ret == 0) {
+            MutexTrace::Acquired(this, g_curthread, wait_start);
+        }
+        return ret;
+    }
+    return LockImpl(abstime, usec);
+}
+
+s32 PthreadMutex::LockImpl(const OrbisKernelTimespec* abstime, u64 usec) {
     Pthread* curthread = g_curthread;
     if (m_owner.load(std::memory_order_acquire) == curthread) {
         return SelfLock(abstime, usec);
@@ -267,6 +377,9 @@ s32 PthreadMutex::TryLock() {
     const s32 ret = m_lock.try_lock() ? 0 : POSIX_EBUSY;
     if (ret == 0) {
         m_owner.store(curthread, std::memory_order_release);
+        if (MutexTrace::Traced(this)) [[unlikely]] {
+            MutexTrace::Acquired(this, curthread, MutexTrace::Clock::now());
+        }
     }
     return ret;
 }
@@ -307,6 +420,9 @@ s32 PthreadMutex::Unlock() {
         const bool deferred = True(m_flags & PthreadMutexFlags::Deferred);
         m_flags &= ~PthreadMutexFlags::Deferred;
 
+        if (MutexTrace::Traced(this)) [[unlikely]] {
+            MutexTrace::Released(this, curthread);
+        }
         m_owner.store(nullptr, std::memory_order_release);
         m_lock.unlock();
 
