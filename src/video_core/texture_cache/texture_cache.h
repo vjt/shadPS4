@@ -5,6 +5,7 @@
 
 #include <mutex>
 #include <optional>
+#include <string_view>
 #include <thread>
 #include <unordered_set>
 #include <absl/container/flat_hash_map.h>
@@ -144,6 +145,9 @@ public:
 
     /// Diagnostic only: the image at SHADPS4_FLIP_OVERRIDE (hex guest address), if one exists.
     [[nodiscard]] ImageId DiagFlipOverride();
+
+    /// Diagnostic only: reads mip 0 of the image back and logs value statistics ([rtstats]).
+    void DiagImageStats(ImageId id, std::string_view tag);
 
     /// Retrieves image whose address matches provided
     [[nodiscard]] ImageId FindImageFromRange(VAddr address, size_t size, bool ensure_valid = true);

@@ -3,9 +3,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <mutex>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -168,6 +171,80 @@ static void RenderTarget(const ImageInfo& info) {
     s.last = info;
 }
 } // namespace FlipDiag
+
+// Diagnostic only: SHADPS4_RT_STATS=<hex addr>[,<hex addr>...] reads those images back at every
+// flip report (needs SHADPS4_FLIP_DIAG) and logs zero/NaN/Inf counts and min/max/mean, so a black
+// frame can be traced to the pass that first writes zeros or NaNs. The flip buffer is always read.
+namespace RtStats {
+static std::vector<VAddr> ParseAddrs() {
+    std::vector<VAddr> out;
+    const char* env = std::getenv("SHADPS4_RT_STATS");
+    for (const char* p = env; p && *p;) {
+        char* end;
+        const auto v = std::strtoull(p, &end, 16);
+        if (end == p) {
+            break;
+        }
+        out.push_back(static_cast<VAddr>(v));
+        p = *end == ',' ? end + 1 : end;
+    }
+    return out;
+}
+static const std::vector<VAddr> addrs = ParseAddrs();
+
+static float Half(u16 h) {
+    const u32 e = (h >> 10) & 0x1f;
+    const u32 m = h & 0x3ff;
+    float v;
+    if (e == 31) {
+        v = m ? NAN : INFINITY;
+    } else if (e == 0) {
+        v = std::ldexp(static_cast<float>(m), -24);
+    } else {
+        v = std::ldexp(static_cast<float>(m | 0x400), static_cast<int>(e) - 25);
+    }
+    return (h >> 15) ? -v : v;
+}
+
+// Unsigned float with a 5-bit exponent (bias 15) and mbits of mantissa (R11G11B10).
+static float UFloat(u32 bits, u32 mbits) {
+    const u32 e = bits >> mbits;
+    const u32 m = bits & ((1u << mbits) - 1);
+    if (e == 31) {
+        return m ? NAN : INFINITY;
+    }
+    const int shift = static_cast<int>(mbits);
+    return e == 0 ? std::ldexp(static_cast<float>(m), -14 - shift)
+                  : std::ldexp(static_cast<float>(m | (1u << mbits)),
+                               static_cast<int>(e) - 15 - shift);
+}
+
+struct Acc {
+    u64 n{}, zero{}, nan{}, inf{};
+    double sum{};
+    float lo{INFINITY}, hi{-INFINITY};
+
+    void Add(float v) {
+        ++n;
+        if (std::isnan(v)) {
+            ++nan;
+        } else if (std::isinf(v)) {
+            ++inf;
+        } else {
+            zero += v == 0.f;
+            sum += v;
+            lo = std::min(lo, v);
+            hi = std::max(hi, v);
+        }
+    }
+
+    std::string Str() const {
+        const u64 finite = n - nan - inf;
+        return fmt::format("n={} zero={} nan={} inf={} min={} max={} mean={}", n, zero, nan, inf,
+                           lo, hi, finite ? sum / finite : 0.0);
+    }
+};
+} // namespace RtStats
 
 static u64 HashBackingMemory(VAddr virtual_addr, u64 size) {
     static constexpr std::array<u8, Core::GUEST_PAGE_SIZE> zeros{};
@@ -889,6 +966,12 @@ ImageId TextureCache::DiagFlipOverride() {
             }
         });
     }
+    static ImageId last_logged{};
+    if (addr != 0 && found != last_logged) {
+        LOG_WARNING(Render_Vulkan, "[flipoverride] {:#x} -> image {}{}", addr, found.index,
+                    found ? "" : " (none, flip buffer presented)");
+        last_logged = found;
+    }
     return found;
 }
 
@@ -921,6 +1004,88 @@ void TextureCache::DiagFlip(const ImageInfo& want, ImageId chosen) {
                     FlipDiag::Describe(top[i].second->last));
     }
     FlipDiag::render_targets.clear();
+
+    DiagImageStats(chosen, "flip");
+    for (const VAddr addr : RtStats::addrs) {
+        std::vector<ImageId> ids;
+        ForEachImageInRegion(addr, 1, [&](ImageId id, Image& image) {
+            if (image.info.guest_address == addr) {
+                ids.push_back(id);
+            }
+        });
+        if (ids.empty()) {
+            LOG_WARNING(Render_Vulkan, "[rtstats] {:#x}: no image", addr);
+        }
+        for (const ImageId id : ids) {
+            DiagImageStats(id, "rt");
+        }
+    }
+}
+
+void TextureCache::DiagImageStats(ImageId id, std::string_view tag) {
+    Image& image = slot_images[id];
+    const auto what = FlipDiag::Describe(image.info);
+    if (False(image.flags & ImageFlagBits::GpuModified)) {
+        LOG_WARNING(Render_Vulkan, "[rtstats] {} image {} not GpuModified flags={:#x} | {}", tag,
+                    id.index, static_cast<u32>(image.flags), what);
+        return;
+    }
+    const u32 width = image.info.size.width;
+    const u32 height = image.info.size.height;
+    const auto [mip_size, mip_pitch, mip_height, mip_offset] = image.info.mips_layout[0];
+    std::array copies{vk::BufferImageCopy{
+        .bufferOffset = 0,
+        .bufferRowLength = mip_pitch,
+        .bufferImageHeight = mip_height,
+        .imageSubresource{
+            .aspectMask = image.aspect_mask & ~vk::ImageAspectFlagBits::eStencil,
+            .mipLevel = 0,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+        .imageOffset = {0, 0, 0},
+        .imageExtent = {mip_pitch ? std::min<u32>(mip_pitch, width) : width,
+                        mip_height ? std::min<u32>(mip_height, height) : height, 1},
+    }};
+    const auto download = runtime.GetStagingPool().Request(mip_size, MemoryType::HostCached, 16);
+    tile_manager.TileImage(image, copies, download.buffer, download.offset);
+    scheduler.Finish();
+    download.Invalidate();
+    const std::span<const u8> data{download.mapped, mip_size};
+
+    RtStats::Acc rgb, alpha;
+    const auto fmt_ = image.info.pixel_format;
+    if (fmt_ == vk::Format::eR16G16B16A16Sfloat) {
+        for (size_t i = 0; i + 8 <= data.size(); i += 8) {
+            for (size_t c = 0; c < 4; ++c) {
+                const u16 h = static_cast<u16>(data[i + 2 * c] | (data[i + 2 * c + 1] << 8));
+                (c == 3 ? alpha : rgb).Add(RtStats::Half(h));
+            }
+        }
+    } else if (fmt_ == vk::Format::eR16G16Sfloat || fmt_ == vk::Format::eR16Sfloat) {
+        for (size_t i = 0; i + 2 <= data.size(); i += 2) {
+            rgb.Add(RtStats::Half(static_cast<u16>(data[i] | (data[i + 1] << 8))));
+        }
+    } else if (fmt_ == vk::Format::eB10G11R11UfloatPack32) {
+        for (size_t i = 0; i + 4 <= data.size(); i += 4) {
+            u32 w;
+            std::memcpy(&w, &data[i], 4);
+            rgb.Add(RtStats::UFloat(w & 0x7ff, 6));
+            rgb.Add(RtStats::UFloat((w >> 11) & 0x7ff, 6));
+            rgb.Add(RtStats::UFloat(w >> 22, 5));
+        }
+    } else if (fmt_ == vk::Format::eR8G8B8A8Unorm || fmt_ == vk::Format::eR8G8B8A8Srgb ||
+               fmt_ == vk::Format::eB8G8R8A8Unorm || fmt_ == vk::Format::eB8G8R8A8Srgb) {
+        for (size_t i = 0; i < data.size(); ++i) {
+            ((i & 3) == 3 ? alpha : rgb).Add(data[i] / 255.f);
+        }
+    } else {
+        for (const u8 b : data) {
+            rgb.Add(b / 255.f);
+        }
+    }
+    LOG_WARNING(Render_Vulkan, "[rtstats] {} image {} {} | rgb {} | a {}", tag, id.index, what,
+                rgb.Str(), alpha.Str());
 }
 
 ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
