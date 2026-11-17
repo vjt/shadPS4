@@ -1,7 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <unordered_set>
+#include <vector>
+
 #include "core/emulator_settings.h"
+#include "shader_recompiler/ir/passes/ir_passes.h"
+#include "shader_recompiler/ir/passes/resource_pass.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/shared_memory.h"
 #include "shader_recompiler/profile.h"
@@ -15,6 +20,33 @@ static void AddFlatbuf(Info& info) {
             .buffer_type = BufferType::Flatbuf,
         });
         info.has_flatbuf = true;
+    }
+}
+
+void FlatbufUsagePass(IR::Program& program) {
+    std::unordered_set<IR::Inst*> visited;
+    std::vector<IR::Inst*> worklist;
+    for (IR::Block* const block : program.blocks) {
+        for (IR::Inst& inst : block->Instructions()) {
+            const auto opcode = inst.GetOpcode();
+            if (opcode == IR::Opcode::GetUserData || opcode == IR::Opcode::ReadConst) {
+                visited.insert(&inst);
+                worklist.push_back(&inst);
+            }
+        }
+    }
+    while (!worklist.empty()) {
+        IR::Inst* const inst = worklist.back();
+        worklist.pop_back();
+        if (inst->MayHaveSideEffects()) {
+            program.info.needs_flatbuf = true;
+            return;
+        }
+        for (const IR::Use& use : inst->Uses()) {
+            if (!IsSharpOperand(*use.user, use.operand) && visited.insert(use.user).second) {
+                worklist.push_back(use.user);
+            }
+        }
     }
 }
 
@@ -246,6 +278,9 @@ void Visit(Info& info, const IR::Inst& inst, Profile const& profile) {
 
 void CollectShaderInfoPass(IR::Program& program, const Profile& profile) {
     Info& info = program.info;
+    if (info.needs_flatbuf) {
+        AddFlatbuf(info);
+    }
     for (IR::Block* const block : program.post_order_blocks) {
         for (IR::Inst& inst : block->Instructions()) {
             Visit(info, inst, profile);

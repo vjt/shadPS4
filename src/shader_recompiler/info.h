@@ -137,6 +137,7 @@ struct Info : InfoPersistent {
     bool has_image_gather{};
     bool has_image_query{};
     bool has_flatbuf{};
+    bool needs_flatbuf{};
     bool uses_buffer_atomic_float_min_max{};
     bool uses_image_atomic_float_min_max{};
     bool uses_shared_atomic_float_min_max{};

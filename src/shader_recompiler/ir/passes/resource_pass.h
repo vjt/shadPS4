@@ -181,4 +181,11 @@ inline bool IsImageInstruction(const IR::Inst& inst) {
     }
 }
 
+inline bool IsSharpOperand(const IR::Inst& inst, u32 operand) {
+    if (IsBufferInstruction(inst) || IsImageInstruction(inst)) {
+        return operand == 0 || (operand == 1 && inst.GetOpcode() == IR::Opcode::ImageSampleRaw);
+    }
+    return false;
+}
+
 } // namespace Shader::Optimization
