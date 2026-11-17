@@ -60,7 +60,7 @@ struct RtStat {
     float last_xs{}, last_ys{};
     float last_xo{}, last_yo{}, last_zs{}, last_zo{};
     s32 last_sc_x{}, last_sc_y{}, last_vsc_x0{}, last_vsc_y0{}, last_vsc_x1{}, last_vsc_y1{};
-    u32 last_vp_ctl{}, last_clip_space{}, last_vsc_en{};
+    u32 last_vp_ctl{}, last_clip_space{}, last_vsc_en{}, last_samples{};
 };
 static const bool enabled = std::getenv("SHADPS4_DRAW_DIAG") != nullptr;
 static std::mutex mutex;
@@ -95,7 +95,7 @@ static void Report() {
                     "stest={} cull={} clipoff={} | last: mode={} "
                     "rop3={:#x} tmask={:#x} smask={:#x} mrt={:#x} blend={} src={} dst={} func={} "
                     "sc={}x{}@{},{} vp={}x{}@{},{} z={}/{} vpctl={:#x} clipspace={} vsc={}:{},{}-{},{} "
-                    "nidx={} ninst={}",
+                    "nidx={} ninst={} samples(n/cb0/db)={:#x}",
                     top[i].first, s.count, s.by_outcome[Filtered], s.by_outcome[NoPipeline],
                     s.by_outcome[BindFailed], s.by_outcome[Drawn], s.mask0, s.vp0, s.sc0, s.nidx0,
                     s.ninst0, s.cb_off, s.indirect, s.rkill, s.dtest, s.stest, s.cull, s.clipoff,
@@ -104,7 +104,7 @@ static void Report() {
                     s.last_func, s.last_sc_w, s.last_sc_h, s.last_sc_x, s.last_sc_y, s.last_xs,
                     s.last_ys, s.last_xo, s.last_yo, s.last_zs, s.last_zo, s.last_vp_ctl,
                     s.last_clip_space, s.last_vsc_en, s.last_vsc_x0, s.last_vsc_y0, s.last_vsc_x1,
-                    s.last_vsc_y1, s.last_nidx, s.last_ninst);
+                    s.last_vsc_y1, s.last_nidx, s.last_ninst, s.last_samples);
     }
     for (const auto& [addr, n] : meta_clears) {
         LOG_WARNING(Render_Vulkan, "[drawdiag]  metaclear rt={:#x} passes={}{}", addr, n,
@@ -118,6 +118,12 @@ static void Report() {
     meta_clears.clear();
     meta_skips.clear();
     totals = {};
+}
+
+/// Packs the pipeline sample counts as num_samples | cb0 << 8 | depth << 16.
+template <typename Key>
+static u32 Samples(const Key& key) {
+    return u32(key.num_samples) | u32(key.color_samples[0]) << 8 | u32(key.depth_samples) << 16;
 }
 
 /// Render passes that would start by clearing a colour target because its CMASK was cleared.
@@ -138,7 +144,8 @@ static void NoteMetaSkip(VAddr address) {
     ++meta_skips[address];
 }
 
-static void Note(const AmdGpu::Regs& regs, Outcome outcome, u32 mrt_mask, bool is_indirect) {
+static void Note(const AmdGpu::Regs& regs, Outcome outcome, u32 mrt_mask, bool is_indirect,
+                 u32 samples = 0) {
     if (!enabled) {
         return;
     }
@@ -177,6 +184,7 @@ static void Note(const AmdGpu::Regs& regs, Outcome outcome, u32 mrt_mask, bool i
         s.last_sc_h = scissor.GetHeight();
         s.last_xs = vp.xscale;
         s.last_ys = vp.yscale;
+        s.last_samples = samples;
         s.last_xo = vp.xoffset;
         s.last_yo = vp.yoffset;
         s.last_zs = vp.zscale;
@@ -375,7 +383,8 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         DrawDiag::Note(regs, DrawDiag::BindFailed, pipeline->GetGraphicsKey().mrt_mask, false);
         return;
     }
-    DrawDiag::Note(regs, DrawDiag::Drawn, pipeline->GetGraphicsKey().mrt_mask, false);
+    DrawDiag::Note(regs, DrawDiag::Drawn, pipeline->GetGraphicsKey().mrt_mask, false,
+                   DrawDiag::Samples(pipeline->GetGraphicsKey()));
     const auto state = BeginRendering(pipeline);
 
     BindVertexBuffers(pipeline);
@@ -440,7 +449,8 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
                        true);
         return;
     }
-    DrawDiag::Note(liverpool->regs, DrawDiag::Drawn, pipeline->GetGraphicsKey().mrt_mask, true);
+    DrawDiag::Note(liverpool->regs, DrawDiag::Drawn, pipeline->GetGraphicsKey().mrt_mask, true,
+                   DrawDiag::Samples(pipeline->GetGraphicsKey()));
     const auto state = BeginRendering(pipeline);
 
     BindVertexBuffers(pipeline);
