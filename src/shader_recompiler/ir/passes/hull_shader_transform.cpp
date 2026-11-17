@@ -1,8 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <optional>
 #include <unordered_map>
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/attribute.h"
 #include "shader_recompiler/ir/breadth_first_search.h"
@@ -407,6 +410,38 @@ void HullShaderTransform(IR::Program& program, const RuntimeInfo& runtime_info) 
                     return ir.BitCast<IR::F32, IR::U32>(IR::U32{data});
                 };
 
+                // TFDIAG: log every tess factor store, optionally drop out-of-range ones
+                static const bool tf_drop_oob = std::getenv("SHADPS4_TF_DROP_OOB") != nullptr;
+                LOG_WARNING(Render_Recompiler,
+                            "[tfdiag] tess_type={} inst_offset={:#x} voffset={:#x} idx={} "
+                            "num_dwords={} threads={} in_cp={} out_stride={} passthrough={}",
+                            u32(runtime_info.sw.tcs.tess_type), u32(info.inst_offset.Value()),
+                            voffset.U32(), gcn_factor_idx, num_dwords,
+                            runtime_info.sw.tcs.num_threads,
+                            runtime_info.sw.tcs.num_input_control_points,
+                            runtime_info.sw.tcs.hs_output_cp_stride,
+                            runtime_info.sw.tcs.IsPassthrough());
+                const auto factor_oob = [&](u32 idx) {
+                    switch (runtime_info.sw.tcs.tess_type) {
+                    case AmdGpu::TessellationType::Isoline:
+                        return idx >= 2;
+                    case AmdGpu::TessellationType::Triangle:
+                        return idx >= 4;
+                    case AmdGpu::TessellationType::Quad:
+                        return idx >= 6;
+                    default:
+                        return false;
+                    }
+                };
+                if (tf_drop_oob && factor_oob(gcn_factor_idx + num_dwords - 1)) {
+                    LOG_WARNING(Render_Recompiler, "[tfdiag] dropping out-of-range store idx={}",
+                                gcn_factor_idx);
+                    if (factor_oob(gcn_factor_idx)) {
+                        inst.Invalidate();
+                        break;
+                    }
+                }
+
                 auto get_factor_attr = [&](u32 gcn_factor_idx) -> IR::Patch {
                     // The hull outputs tess factors in different formats depending on the shader.
                     // For triangle domains, it seems to pack the entries into 4 consecutive floats,
@@ -444,6 +479,9 @@ void HullShaderTransform(IR::Program& program, const RuntimeInfo& runtime_info) 
                                 inst->GetOpcode() == IR::Opcode::CompositeConstructU32x3 ||
                                 inst->GetOpcode() == IR::Opcode::CompositeConstructU32x4));
                 for (s32 i = 0; i < num_dwords; i++) {
+                    if (tf_drop_oob && factor_oob(gcn_factor_idx + i)) {
+                        continue;
+                    }
                     ir.SetPatch(get_factor_attr(gcn_factor_idx + i), GetValue(inst->Arg(i)));
                 }
                 break;
