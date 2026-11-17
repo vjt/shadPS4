@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include "common/assert.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
@@ -278,6 +279,12 @@ void EmitSetAttribute(EmitContext& ctx, IR::Attribute attr, Id value, u32 elemen
     if (IR::IsMrt(attr)) {
         const u32 index{u32(attr) - u32(IR::Attribute::RenderTarget0)};
         const auto& info{ctx.frag_outputs.at(index)};
+        // Diagnostic only: SHADPS4_PS_FORCE_WHITE replaces every colour export with 1.0, to tell
+        // "no fragments reach the render target" apart from "the shader computes zero".
+        static const bool force_white = std::getenv("SHADPS4_PS_FORCE_WHITE") != nullptr;
+        if (force_white) {
+            value = ctx.ConstF32(1.0f);
+        }
         if (element < 3 && ctx.runtime_info.hw.fs.color_buffers[index].blend_self_scale) {
             // Emulates GCN's factor-scaled min/max blend: min/max(src*src, dst*dst).
             value = ctx.OpFMul(ctx.F32[1], value, value);
