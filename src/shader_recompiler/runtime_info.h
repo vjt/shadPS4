@@ -109,6 +109,8 @@ struct SwTessControlRuntimeInfo {
     bool offchip_lds_enable;
     u32 ls_stride;
     u32 hs_output_base;
+    // Dynamic HS (GFX7) writes a control word before the edge factors in the TF buffer
+    u32 first_edge_tf_index;
 
     bool operator==(const SwTessControlRuntimeInfo&) const = default;
 
@@ -341,6 +343,7 @@ struct RuntimeInfo {
             sw.tcs.hs_output_cp_stride = tess_constants.hs_cp_stride;
             sw.tcs.ls_stride = tess_constants.ls_stride;
             sw.tcs.hs_output_base = tess_constants.hs_output_base;
+            sw.tcs.first_edge_tf_index = tess_constants.first_edge_tess_factor_index;
         } else if (sw_stage == SwStage::TessellationEval) {
             sw.tes.hs_output_cp_stride = tess_constants.hs_cp_stride;
         }

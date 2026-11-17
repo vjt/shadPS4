@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
@@ -244,6 +245,11 @@ Id EmitGetAttributeU32(EmitContext& ctx, IR::Attribute attr, u32 comp) {
             return ctx.OpShiftLeftLogical(ctx.U32[1], invocation_id, ctx.ConstU32(8u));
         }
     }
+    case IR::Attribute::OffChipLdsBase:
+        // DIAG: off-chip tessellation not implemented, read as 0 to get past emission
+        LOG_WARNING(Render_Recompiler, "[offchip] OffChipLdsBase read as 0 (stage {})",
+                    u32(ctx.stage));
+        return ctx.u32_zero_value;
     default:
         UNREACHABLE_MSG("Read U32 attribute {}", attr);
     }
