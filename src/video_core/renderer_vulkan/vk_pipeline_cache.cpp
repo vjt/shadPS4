@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <ranges>
 
 #include "common/hash.h"
@@ -459,6 +460,11 @@ bool PipelineCache::RefreshGraphicsKey() {
     key.sample_mask = 0;
     for (const u16 pixel_mask : regs.aa_mask.pixel) {
         key.sample_mask |= pixel_mask;
+    }
+    // Diagnostic only: SHADPS4_SAMPLE_MASK_ALL ignores PA_SC_AA_MASK and enables every sample.
+    static const bool sample_mask_all = std::getenv("SHADPS4_SAMPLE_MASK_ALL") != nullptr;
+    if (sample_mask_all) {
+        key.sample_mask = 0xffffffffu;
     }
     key.cb_shader_mask = regs.color_shader_mask;
 
