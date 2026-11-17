@@ -666,8 +666,12 @@ static vk::Format GetFrameViewFormat(const Libraries::VideoOut::PixelFormat form
 Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
                                VAddr cpu_address) {
     auto desc = VideoCore::TextureCache::ImageDesc{attribute, cpu_address};
-    const auto image_id = texture_cache.FindImage(desc);
+    auto image_id = texture_cache.FindImage(desc);
     texture_cache.DiagFlip(desc.info, image_id);
+    const auto override_id = texture_cache.DiagFlipOverride();
+    if (override_id) {
+        image_id = override_id;
+    }
     texture_cache.UpdateImage(image_id);
 
     Frame* frame = GetRenderFrame();
@@ -699,7 +703,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     });
 
     VideoCore::ImageViewInfo view_info{};
-    view_info.format = GetFrameViewFormat(attribute.attrib.pixel_format);
+    view_info.format = override_id ? texture_cache.GetImage(image_id).info.pixel_format
+                                   : GetFrameViewFormat(attribute.attrib.pixel_format);
     // Exclude alpha from output frame to avoid blending with UI.
     view_info.mapping.a = AmdGpu::CompSwizzle::One;
 

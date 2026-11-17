@@ -142,6 +142,9 @@ public:
     /// Diagnostic only (SHADPS4_FLIP_DIAG): reports the image picked for a flip buffer.
     void DiagFlip(const ImageInfo& want, ImageId chosen);
 
+    /// Diagnostic only: the image at SHADPS4_FLIP_OVERRIDE (hex guest address), if one exists.
+    [[nodiscard]] ImageId DiagFlipOverride();
+
     /// Retrieves image whose address matches provided
     [[nodiscard]] ImageId FindImageFromRange(VAddr address, size_t size, bool ensure_valid = true);
 

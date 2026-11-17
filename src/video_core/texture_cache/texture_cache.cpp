@@ -876,6 +876,22 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
     return {};
 }
 
+ImageId TextureCache::DiagFlipOverride() {
+    static const VAddr addr = [] {
+        const char* env = std::getenv("SHADPS4_FLIP_OVERRIDE");
+        return env ? static_cast<VAddr>(std::strtoull(env, nullptr, 16)) : VAddr{0};
+    }();
+    ImageId found{};
+    if (addr != 0) {
+        ForEachImageInRegion(addr, 1, [&](ImageId id, Image& image) {
+            if (image.info.guest_address == addr) {
+                found = id;
+            }
+        });
+    }
+    return found;
+}
+
 void TextureCache::DiagFlip(const ImageInfo& want, ImageId chosen) {
     if (!FlipDiag::enabled) {
         return;
