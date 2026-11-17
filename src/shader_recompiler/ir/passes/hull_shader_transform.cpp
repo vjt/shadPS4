@@ -702,7 +702,12 @@ static void LowerOffChipBufferAccess(IR::Program& program) {
                 continue;
             }
             const auto buf_info = inst.Flags<IR::BufferInstInfo>();
-            ASSERT_MSG(!buf_info.index_enable, "Indexed off-chip tessellation access");
+            // Games set IDXEN with a constant zero index (the address is all in VOFFSET).
+            if (buf_info.index_enable) {
+                const IR::U32 index = IR::GetBufferIndexArg(&inst);
+                ASSERT_MSG(index.IsImmediate() && index.U32() == 0,
+                           "Indexed off-chip tessellation access");
+            }
 
             IR::IREmitter ir{*block, IR::Block::InstructionList::s_iterator_to(inst)};
             IR::U32 addr =
