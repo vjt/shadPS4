@@ -861,6 +861,15 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                                 stage.pgm_hash);
                 }
                 push_data.AddOffset(binding.buffer, adjust);
+                if (offset_aligned + size + adjust > buffer->SizeBytes()) {
+                    LOG_ERROR(Render_Vulkan,
+                              "[binddiag] OOB binding shader {:#x} binding {} base {:#x} "
+                              "vsize {:#x} size {:#x} offset {:#x} adjust {:#x} buf_cpu {:#x} "
+                              "buf_size {:#x}",
+                              stage.pgm_hash, binding.buffer, vsharp.base_address,
+                              vsharp.GetSize(), size, offset, adjust, buffer->CpuAddr(),
+                              buffer->SizeBytes());
+                }
                 buffer_infos.emplace_back(buffer->Handle(), offset_aligned, size + adjust);
                 bound_buffers.emplace_back(buffer, offset, size, src_access);
                 if (desc.is_written) {
