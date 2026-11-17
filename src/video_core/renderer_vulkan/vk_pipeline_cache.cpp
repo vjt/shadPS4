@@ -3,6 +3,9 @@
 
 #include <algorithm>
 #include <ranges>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "common/hash.h"
 #include "common/io_file.h"
@@ -704,6 +707,41 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     return module;
 }
 
+namespace PermDiag {
+// diag: how many unified/buffer bindings each permutation's module really consumed, versus
+// what Info::AddBindings advances on a cached permutation.
+struct Counts {
+    u32 b, i, s, img_binds;
+};
+static Counts Count(const Shader::Info& info) {
+    u32 ib = 0;
+    for (const auto& img : info.images) {
+        ib += img.NumBindings(info);
+    }
+    return {static_cast<u32>(info.buffers.size()), static_cast<u32>(info.images.size()),
+            static_cast<u32>(info.samplers.size()), ib};
+}
+static std::unordered_map<u64, Shader::Backend::Bindings> deltas;
+static std::unordered_set<u64> logged;
+static bool Once(u64 key) {
+    return logged.insert(key).second;
+}
+static void Log(const char* path, u64 pgm_hash, size_t perm_idx, Shader::Backend::Bindings start,
+                Shader::Backend::Bindings actual, const Counts& prog, const Counts* fresh) {
+    LOG_WARNING(Render_Vulkan,
+                "[permdiag] {} pgm {:#x} perm {} start u{}/b{} delta u{}/b{} prog_info "
+                "b{} i{}({}) s{} fresh_info {}",
+                path, pgm_hash, perm_idx, start.unified, start.buffer, actual.unified,
+                actual.buffer, prog.b, prog.i, prog.img_binds, prog.s,
+                fresh ? fmt::format("b{} i{}({}) s{}", fresh->b, fresh->i, fresh->img_binds,
+                                    fresh->s)
+                      : std::string("-"));
+}
+static Shader::Backend::Bindings Sub(Shader::Backend::Bindings a, Shader::Backend::Bindings b) {
+    return {a.unified - b.unified, a.buffer - b.buffer};
+}
+} // namespace PermDiag
+
 PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_stage,
                                                 const Shader::ShaderParams& params,
                                                 Shader::Backend::Bindings& binding) {
@@ -716,6 +754,14 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         const auto module = CompileModule(program->info, runtime_info, params.code, 0, binding);
         auto spec = Shader::StageSpecialization(program->info, runtime_info, profile, start);
         const auto perm_hash = HashCombine(params.hash, 0);
+        {
+            const auto actual = PermDiag::Sub(binding, start);
+            PermDiag::deltas[perm_hash] = actual;
+            const auto c = PermDiag::Count(program->info);
+            if (actual.unified != c.b + c.i + c.s && PermDiag::Once(perm_hash ^ 1)) {
+                PermDiag::Log("new-program", params.hash, 0, start, actual, c, nullptr);
+            }
+        }
 
         RegisterShaderMeta(program->info, spec.fetch_shader_data, spec, perm_hash, 0);
         program->AddPermut(module, std::move(spec));
@@ -740,15 +786,43 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
     if (it == program->modules.end()) {
         auto new_info = Shader::Info(hw_stage, sw_stage, params);
+        const auto start = binding;
         module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
+        {
+            const auto actual = PermDiag::Sub(binding, start);
+            PermDiag::deltas[perm_hash] = actual;
+            const auto c = PermDiag::Count(info);
+            const auto f = PermDiag::Count(new_info);
+            if ((actual.unified != c.b + c.i + c.s || f.b != c.b || f.i != c.i || f.s != c.s) &&
+                PermDiag::Once(perm_hash ^ 2)) {
+                PermDiag::Log("new-perm", params.hash, perm_idx, start, actual, c, &f);
+            }
+        }
 
         RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
         program->AddPermut(module, std::move(spec));
     } else {
+        const auto start = binding;
         info.AddBindings(binding);
         module = it->module;
         perm_idx = std::distance(program->modules.begin(), it);
         perm_hash = HashCombine(params.hash, perm_idx);
+        {
+            const auto applied = PermDiag::Sub(binding, start);
+            const auto d = PermDiag::deltas.find(perm_hash);
+            if (d == PermDiag::deltas.end()) {
+                if (PermDiag::Once(perm_hash ^ 3)) {
+                    PermDiag::Log("cached-nodelta", params.hash, perm_idx, start, applied,
+                                  PermDiag::Count(info), nullptr);
+                }
+            } else if (d->second != applied && PermDiag::Once(perm_hash ^ 4)) {
+                LOG_WARNING(Render_Vulkan,
+                            "[permdiag] cached-MISMATCH pgm {:#x} perm {} module consumed "
+                            "u{}/b{} AddBindings applied u{}/b{}",
+                            params.hash, perm_idx, d->second.unified, d->second.buffer,
+                            applied.unified, applied.buffer);
+            }
+        }
     }
     if (auto& fetch = program->modules[perm_idx].spec.fetch_shader_data; !fetch.Empty()) {
         fetch_shader = &fetch;
