@@ -138,6 +138,37 @@ static void Deleted() {
 }
 } // namespace ImgDiag
 
+// Diagnostic only, enabled by SHADPS4_FLIP_DIAG: every REPORT_EVERY flips, logs the image the
+// presenter picked for the flip buffer, every image overlapping that buffer, and the colour render
+// targets bound since the previous report. Used to find why a title presents a black frame.
+namespace FlipDiag {
+static constexpr u64 REPORT_EVERY = 120;
+struct RtStat {
+    u64 count{};
+    ImageInfo last{};
+};
+static const bool enabled = std::getenv("SHADPS4_FLIP_DIAG") != nullptr;
+static std::mutex mutex;
+static u64 flips{};
+static std::unordered_map<VAddr, RtStat> render_targets;
+
+static std::string Describe(const ImageInfo& l) {
+    return fmt::format("{:#x} {}x{} {} tile={:#x} pitch={} gsize={:#x}", l.guest_address,
+                       l.size.width, l.size.height, vk::to_string(l.pixel_format),
+                       static_cast<u32>(l.tile_mode), l.pitch, l.guest_size);
+}
+
+static void RenderTarget(const ImageInfo& info) {
+    if (!enabled) {
+        return;
+    }
+    std::scoped_lock lk{mutex};
+    auto& s = render_targets[info.guest_address];
+    ++s.count;
+    s.last = info;
+}
+} // namespace FlipDiag
+
 static u64 HashBackingMemory(VAddr virtual_addr, u64 size) {
     static constexpr std::array<u8, Core::GUEST_PAGE_SIZE> zeros{};
     auto* state = XXH3_createState();
@@ -845,6 +876,37 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
     return {};
 }
 
+void TextureCache::DiagFlip(const ImageInfo& want, ImageId chosen) {
+    if (!FlipDiag::enabled) {
+        return;
+    }
+    std::scoped_lock lk{FlipDiag::mutex};
+    if (++FlipDiag::flips % FlipDiag::REPORT_EVERY != 0) {
+        return;
+    }
+    const Image& c = slot_images[chosen];
+    LOG_WARNING(Render_Vulkan, "[flipdiag] flip #{} want {} -> image {} flags={:#x} rt={} | {}",
+                FlipDiag::flips, FlipDiag::Describe(want), chosen.index,
+                static_cast<u32>(c.flags), static_cast<u32>(c.usage.render_target),
+                FlipDiag::Describe(c.info));
+    ForEachImageInRegion(want.guest_address, want.guest_size, [&](ImageId id, Image& image) {
+        LOG_WARNING(Render_Vulkan, "[flipdiag]   overlap image {} flags={:#x} rt={} | {}",
+                    id.index, static_cast<u32>(image.flags),
+                    static_cast<u32>(image.usage.render_target), FlipDiag::Describe(image.info));
+    });
+    std::vector<std::pair<VAddr, const FlipDiag::RtStat*>> top;
+    for (const auto& [addr, st] : FlipDiag::render_targets) {
+        top.emplace_back(addr, &st);
+    }
+    std::sort(top.begin(), top.end(),
+              [](const auto& a, const auto& b) { return a.second->count > b.second->count; });
+    for (size_t i = 0; i < std::min<size_t>(top.size(), 10); ++i) {
+        LOG_WARNING(Render_Vulkan, "[flipdiag]   rt x{} | {}", top[i].second->count,
+                    FlipDiag::Describe(top[i].second->last));
+    }
+    FlipDiag::render_targets.clear();
+}
+
 ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     if (desc.type == BindingType::Storage) {
@@ -886,6 +948,7 @@ void TextureCache::UnregisterMeta(VAddr address, u64 owner_uid) {
 
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
+    FlipDiag::RenderTarget(image.info);
     image.flags |= ImageFlagBits::GpuModified;
     if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
         std::unique_lock lk{download_images_mutex};

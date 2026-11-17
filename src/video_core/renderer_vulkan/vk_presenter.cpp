@@ -667,6 +667,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                                VAddr cpu_address) {
     auto desc = VideoCore::TextureCache::ImageDesc{attribute, cpu_address};
     const auto image_id = texture_cache.FindImage(desc);
+    texture_cache.DiagFlip(desc.info, image_id);
     texture_cache.UpdateImage(image_id);
 
     Frame* frame = GetRenderFrame();

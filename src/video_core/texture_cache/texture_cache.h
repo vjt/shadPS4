@@ -139,6 +139,9 @@ public:
     /// Retrieves the image handle of the image with the provided attributes.
     [[nodiscard]] ImageId FindImage(ImageDesc& desc, bool exact_fmt = false);
 
+    /// Diagnostic only (SHADPS4_FLIP_DIAG): reports the image picked for a flip buffer.
+    void DiagFlip(const ImageInfo& want, ImageId chosen);
+
     /// Retrieves image whose address matches provided
     [[nodiscard]] ImageId FindImageFromRange(VAddr address, size_t size, bool ensure_valid = true);
 
