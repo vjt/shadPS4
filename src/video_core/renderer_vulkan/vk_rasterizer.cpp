@@ -58,6 +58,9 @@ struct RtStat {
     u32 last_blend_en{}, last_src{}, last_dst{}, last_func{};
     u32 last_sc_w{}, last_sc_h{}, last_nidx{}, last_ninst{};
     float last_xs{}, last_ys{};
+    float last_xo{}, last_yo{}, last_zs{}, last_zo{};
+    s32 last_sc_x{}, last_sc_y{}, last_vsc_x0{}, last_vsc_y0{}, last_vsc_x1{}, last_vsc_y1{};
+    u32 last_vp_ctl{}, last_clip_space{}, last_vsc_en{};
 };
 static const bool enabled = std::getenv("SHADPS4_DRAW_DIAG") != nullptr;
 static std::mutex mutex;
@@ -91,14 +94,17 @@ static void Report() {
                     "vp0={} sc0={} nidx0={} ninst0={} cboff={} indirect={} rkill={} dtest={} "
                     "stest={} cull={} clipoff={} | last: mode={} "
                     "rop3={:#x} tmask={:#x} smask={:#x} mrt={:#x} blend={} src={} dst={} func={} "
-                    "sc={}x{} vp={}x{} nidx={} ninst={}",
+                    "sc={}x{}@{},{} vp={}x{}@{},{} z={}/{} vpctl={:#x} clipspace={} vsc={}:{},{}-{},{} "
+                    "nidx={} ninst={}",
                     top[i].first, s.count, s.by_outcome[Filtered], s.by_outcome[NoPipeline],
                     s.by_outcome[BindFailed], s.by_outcome[Drawn], s.mask0, s.vp0, s.sc0, s.nidx0,
                     s.ninst0, s.cb_off, s.indirect, s.rkill, s.dtest, s.stest, s.cull, s.clipoff,
                     s.last_mode, s.last_rop3, s.last_target,
                     s.last_shader, s.last_mrt, s.last_blend_en, s.last_src, s.last_dst,
-                    s.last_func, s.last_sc_w, s.last_sc_h, s.last_xs, s.last_ys, s.last_nidx,
-                    s.last_ninst);
+                    s.last_func, s.last_sc_w, s.last_sc_h, s.last_sc_x, s.last_sc_y, s.last_xs,
+                    s.last_ys, s.last_xo, s.last_yo, s.last_zs, s.last_zo, s.last_vp_ctl,
+                    s.last_clip_space, s.last_vsc_en, s.last_vsc_x0, s.last_vsc_y0, s.last_vsc_x1,
+                    s.last_vsc_y1, s.last_nidx, s.last_ninst);
     }
     for (const auto& [addr, n] : meta_clears) {
         LOG_WARNING(Render_Vulkan, "[drawdiag]  metaclear rt={:#x} passes={}{}", addr, n,
@@ -171,6 +177,19 @@ static void Note(const AmdGpu::Regs& regs, Outcome outcome, u32 mrt_mask, bool i
         s.last_sc_h = scissor.GetHeight();
         s.last_xs = vp.xscale;
         s.last_ys = vp.yscale;
+        s.last_xo = vp.xoffset;
+        s.last_yo = vp.yoffset;
+        s.last_zs = vp.zscale;
+        s.last_zo = vp.zoffset;
+        s.last_sc_x = scissor.top_left_x;
+        s.last_sc_y = scissor.top_left_y;
+        s.last_vp_ctl = std::bit_cast<u32>(regs.viewport_control);
+        s.last_clip_space = static_cast<u32>(regs.clipper_control.clip_space);
+        s.last_vsc_en = regs.mode_control.vport_scissor_enable;
+        s.last_vsc_x0 = regs.viewport_scissors[0].top_left_x;
+        s.last_vsc_y0 = regs.viewport_scissors[0].top_left_y;
+        s.last_vsc_x1 = regs.viewport_scissors[0].bottom_right_x;
+        s.last_vsc_y1 = regs.viewport_scissors[0].bottom_right_y;
         s.last_nidx = regs.num_indices;
         s.last_ninst = regs.num_instances.NumInstances();
     }
