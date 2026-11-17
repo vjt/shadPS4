@@ -45,6 +45,10 @@ void Regs::SetDefaults() {
     reg_array[ContextRegWordOffset + 0x02fb] = 0x3f800000u;
     reg_array[ContextRegWordOffset + 0x02fc] = 0x3f800000u;
     reg_array[ContextRegWordOffset + 0x02fd] = 0x3f800000u;
+    // PA_SC_AA_MASK: every sample enabled. The pre-4.00 context reset (CLEAR_STATE followed by
+    // two registers) relies on this; a zero mask makes every draw write nothing.
+    reg_array[ContextRegWordOffset + 0x030e] = 0xffffffffu;
+    reg_array[ContextRegWordOffset + 0x030f] = 0xffffffffu;
     reg_array[ContextRegWordOffset + 0x0316] = 0x0000000eu;
     reg_array[ContextRegWordOffset + 0x0317] = 0x00000010u;
 }
