@@ -111,6 +111,7 @@ struct SwTessControlRuntimeInfo {
     u32 hs_output_base;
     // Dynamic HS (GFX7) writes a control word before the edge factors in the TF buffer
     u32 first_edge_tf_index;
+    bool dynamic_hs;
 
     bool operator==(const SwTessControlRuntimeInfo&) const = default;
 

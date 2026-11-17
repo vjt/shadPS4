@@ -410,7 +410,11 @@ void HullShaderTransform(IR::Program& program, const RuntimeInfo& runtime_info) 
                     return ir.BitCast<IR::F32, IR::U32>(IR::U32{data});
                 };
 
-                const u32 first_edge = runtime_info.sw.tcs.first_edge_tf_index;
+                // GFX7 dynamic HS: the shader stores a control word (0x80000000) at TF offset 0
+                // and the edge factors start at dword 1 (cfr. Mesa ac_nir_lower_tess_io_to_mem)
+                const u32 first_edge = runtime_info.sw.tcs.dynamic_hs
+                                           ? 1u
+                                           : runtime_info.sw.tcs.first_edge_tf_index;
                 // TFDIAG: log every tess factor store, optionally drop out-of-range ones
                 static const bool tf_drop_oob = std::getenv("SHADPS4_TF_DROP_OOB") != nullptr;
                 LOG_WARNING(Render_Recompiler,
@@ -421,7 +425,7 @@ void HullShaderTransform(IR::Program& program, const RuntimeInfo& runtime_info) 
                             runtime_info.sw.tcs.num_threads,
                             runtime_info.sw.tcs.num_input_control_points,
                             runtime_info.sw.tcs.hs_output_cp_stride,
-                            runtime_info.sw.tcs.IsPassthrough(), runtime_info.sw.tcs.first_edge_tf_index);
+                            runtime_info.sw.tcs.IsPassthrough(), first_edge);
                 const auto factor_oob = [&](u32 idx) {
                     switch (runtime_info.sw.tcs.tess_type) {
                     case AmdGpu::TessellationType::Isoline:
