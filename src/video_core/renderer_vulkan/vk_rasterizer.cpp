@@ -64,6 +64,12 @@ static std::mutex mutex;
 static std::unordered_map<VAddr, RtStat> per_rt;
 static std::array<u64, NumOutcomes> totals{};
 static auto last_report = std::chrono::steady_clock::now();
+// SHADPS4_NO_META_CLEAR: never turn a cleared CMASK/HTILE into a clearing render pass.
+// SHADPS4_NO_META_SKIP: run compute dispatches even when taken for metadata clears.
+static const bool no_meta_clear = std::getenv("SHADPS4_NO_META_CLEAR") != nullptr;
+static const bool no_meta_skip = std::getenv("SHADPS4_NO_META_SKIP") != nullptr;
+static std::unordered_map<VAddr, u64> meta_clears;
+static std::unordered_map<VAddr, u64> meta_skips;
 
 static void Report() {
     std::string outcomes;
@@ -94,8 +100,36 @@ static void Report() {
                     s.last_func, s.last_sc_w, s.last_sc_h, s.last_xs, s.last_ys, s.last_nidx,
                     s.last_ninst);
     }
+    for (const auto& [addr, n] : meta_clears) {
+        LOG_WARNING(Render_Vulkan, "[drawdiag]  metaclear rt={:#x} passes={}{}", addr, n,
+                    no_meta_clear ? " (suppressed)" : "");
+    }
+    for (const auto& [addr, n] : meta_skips) {
+        LOG_WARNING(Render_Vulkan, "[drawdiag]  metaskip buf={:#x} dispatches={}{}", addr, n,
+                    no_meta_skip ? " (dispatched anyway)" : "");
+    }
     per_rt.clear();
+    meta_clears.clear();
+    meta_skips.clear();
     totals = {};
+}
+
+/// Render passes that would start by clearing a colour target because its CMASK was cleared.
+static void NoteMetaClear(VAddr rt) {
+    if (!enabled) {
+        return;
+    }
+    std::scoped_lock lk{mutex};
+    ++meta_clears[rt];
+}
+
+/// Compute dispatches skipped because they were taken for metadata clears.
+static void NoteMetaSkip(VAddr address) {
+    if (!enabled) {
+        return;
+    }
+    std::scoped_lock lk{mutex};
+    ++meta_skips[address];
 }
 
 static void Note(const AmdGpu::Regs& regs, Outcome outcome, u32 mrt_mask, bool is_indirect) {
@@ -775,7 +809,8 @@ bool Rasterizer::IsComputeMetaClear(const Pipeline* pipeline) {
             if (!desc.IsSpecial() && desc.is_written && texture_cache.ClearMeta(address)) {
                 // Assume all slices were updates
                 LOG_TRACE(Render_Vulkan, "Metadata update skipped");
-                return true;
+                DrawDiag::NoteMetaSkip(address);
+                return !DrawDiag::no_meta_skip;
             }
         }
     }
@@ -1212,8 +1247,12 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         const auto mip = image_view.info.range.base.level;
 
         const auto& col_buf = regs.color_buffers[cb];
-        const bool is_clear = texture_cache.IsMetaCleared(col_buf.CmaskAddress(), slice);
+        bool is_clear = texture_cache.IsMetaCleared(col_buf.CmaskAddress(), slice);
         texture_cache.TouchMeta(col_buf.CmaskAddress(), slice, false);
+        if (is_clear) {
+            DrawDiag::NoteMetaClear(col_buf.Address());
+            is_clear = !DrawDiag::no_meta_clear;
+        }
 
         if (image->binding.is_bound) {
             ASSERT_MSG(!image->binding.force_general,
@@ -1265,7 +1304,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         const bool is_depth_clear =
             (regs.depth_render_control.depth_clear_enable && regs.depth_control.depth_enable &&
              regs.depth_control.depth_write_enable) ||
-            texture_cache.IsMetaCleared(htile_address, slice);
+            (texture_cache.IsMetaCleared(htile_address, slice) && !DrawDiag::no_meta_clear);
         const bool is_stencil_clear = regs.depth_render_control.stencil_clear_enable;
         texture_cache.TouchMeta(htile_address, slice, false);
         ASSERT(desc.view_info.range.extent.levels == 1 && !image.binding.needs_rebind);

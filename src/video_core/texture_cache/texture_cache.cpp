@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -140,6 +141,84 @@ static void Deleted() {
     ++deleted;
 }
 } // namespace ImgDiag
+
+// Diagnostic only, enabled by SHADPS4_UPLOAD_DIAG: counts image refreshes (uploads from guest
+// memory or from the buffer cache) per guest address, with the dirty reason, whether the image had
+// already been used as a render target and whether the first 4 KiB of guest memory are zero, and
+// logs a summary every 2 seconds. SHADPS4_NO_RT_UPLOAD drops the refresh of images that have been
+// render targets. Used to find whether rendered content gets overwritten by a later upload.
+namespace UploadDiag {
+struct AddrStat {
+    u64 count{}, rt{}, zero{}, cpu{}, maybe{}, gpu{}, skipped{};
+    u32 width{}, height{}, bits{};
+    vk::Format format{};
+};
+static const bool enabled = std::getenv("SHADPS4_UPLOAD_DIAG") != nullptr;
+static const bool skip_rt = std::getenv("SHADPS4_NO_RT_UPLOAD") != nullptr;
+static std::mutex mutex;
+static std::unordered_map<VAddr, AddrStat> per_addr;
+static u64 total{}, total_rt{}, total_skipped{};
+static auto last_report = std::chrono::steady_clock::now();
+
+static void Report() {
+    LOG_WARNING(Render_Vulkan, "[uploaddiag] refreshes={} of_rt={} skipped={} addrs={}", total,
+                total_rt, total_skipped, per_addr.size());
+    std::vector<std::pair<VAddr, const AddrStat*>> top;
+    top.reserve(per_addr.size());
+    for (const auto& [addr, stat] : per_addr) {
+        top.emplace_back(addr, &stat);
+    }
+    std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) {
+        return a.second->rt != b.second->rt ? a.second->rt > b.second->rt
+                                            : a.second->count > b.second->count;
+    });
+    for (size_t i = 0; i < std::min<size_t>(top.size(), 12); ++i) {
+        const auto& s = *top[i].second;
+        LOG_WARNING(Render_Vulkan,
+                    "[uploaddiag]  {:#x} n={} rt={} skipped={} cpu={} maybe={} gpu={} "
+                    "zerohead={} | {}x{} bits={} {}",
+                    top[i].first, s.count, s.rt, s.skipped, s.cpu, s.maybe, s.gpu, s.zero,
+                    s.width, s.height, s.bits, vk::to_string(s.format));
+    }
+    per_addr.clear();
+    total = total_rt = total_skipped = 0;
+}
+
+/// Returns true if the refresh must be skipped.
+static bool Note(const Image& image) {
+    const bool is_rt = image.usage.render_target;
+    const bool skip = skip_rt && is_rt;
+    if (!enabled) {
+        return skip;
+    }
+    const auto& info = image.info;
+    const u8* head = std::bit_cast<const u8*>(info.guest_address);
+    const size_t head_size = std::min<size_t>(info.guest_size, 4096);
+    const bool zero = std::all_of(head, head + head_size, [](u8 b) { return b == 0; });
+    std::scoped_lock lk{mutex};
+    auto& s = per_addr[info.guest_address];
+    ++s.count;
+    s.rt += is_rt;
+    s.zero += zero;
+    s.cpu += True(image.flags & ImageFlagBits::CpuDirty);
+    s.maybe += True(image.flags & ImageFlagBits::MaybeCpuDirty);
+    s.gpu += True(image.flags & ImageFlagBits::GpuDirty);
+    s.skipped += skip;
+    s.width = info.size.width;
+    s.height = info.size.height;
+    s.bits = info.num_bits;
+    s.format = info.pixel_format;
+    ++total;
+    total_rt += is_rt;
+    total_skipped += skip;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_report >= std::chrono::seconds(2)) {
+        last_report = now;
+        Report();
+    }
+    return skip;
+}
+} // namespace UploadDiag
 
 // Diagnostic only, enabled by SHADPS4_FLIP_DIAG: every REPORT_EVERY flips, logs the image the
 // presenter picked for the flip buffer, every image overlapping that buffer, and the colour render
@@ -1257,6 +1336,11 @@ void TextureCache::RefreshImage(Image& image) {
             return;
         }
         image.cpu_hash = hash;
+    }
+
+    if (UploadDiag::Note(image)) {
+        image.flags &= ~ImageFlagBits::Dirty;
+        return;
     }
 
     image.gpu_hash = 0;
