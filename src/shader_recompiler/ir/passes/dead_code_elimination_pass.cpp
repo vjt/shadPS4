@@ -17,11 +17,11 @@ void DeadCodeEliminationPass(IR::Program& program) {
         auto it{block->end()};
         while (it != block->begin()) {
             --it;
-            const bool has_side_effects = it->MayHaveSideEffects();
-            if (!it->HasUses() && !has_side_effects) {
+            const bool keep = it->MayHaveSideEffects() || it->IsKeptAlive();
+            if (!it->HasUses() && !keep) {
                 it->Invalidate();
                 it = block->Instructions().erase(it);
-            } else if (has_side_effects) {
+            } else if (keep) {
                 live.insert(&*it);
                 worklist.push(&*it);
             }

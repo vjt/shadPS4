@@ -116,6 +116,14 @@ public:
     }
 
     bool MayHaveSideEffects() const noexcept;
+
+    /// Keeps the instruction, and so its arguments, from being removed as dead code.
+    void SetKeepAlive() noexcept {
+        keep_alive = true;
+    }
+    bool IsKeptAlive() const noexcept {
+        return keep_alive;
+    }
     bool AreAllArgsImmediates() const;
 
     IR::Type Type() const;
@@ -141,6 +149,7 @@ private:
 
     IR::Opcode op{};
     u32 definition{};
+    bool keep_alive{};
     u64 flags{};
     IR::Block* parent{};
     RegTag reg_tag{};
