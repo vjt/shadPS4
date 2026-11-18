@@ -13,7 +13,7 @@
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
 static constexpr u32 ShaderBinaryVersion = 13u;
-static constexpr u32 ShaderMetaVersion = 7u;
+static constexpr u32 ShaderMetaVersion = 8u;
 static constexpr u32 PipelineKeyVersion = 4u;
 } // namespace Serialization
 
@@ -266,6 +266,7 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
     // at the exact position rather than append
 
     vk::ShaderModule module{};
+    auto perm_info = std::make_unique<Shader::Info>(program->info);
 
     auto [it_pgm, new_program] = program_cache.try_emplace(program->info.pgm_hash);
     if (new_program) {
@@ -290,9 +291,9 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
             module = CompileSPV(spv, instance.GetDevice());
         }
     }
-    it_pgm.value()->InsertPermut(module, std::move(spec), perm_idx);
+    it_pgm.value()->InsertPermut(module, std::move(spec), perm_idx, std::move(perm_info));
 
-    infos[stage] = &it_pgm.value()->info;
+    infos[stage] = &it_pgm.value()->PermutInfo(perm_idx);
     modules[stage] = module;
     if (auto& fetch = it_pgm.value()->modules[perm_idx].spec.fetch_shader_data; !fetch.Empty()) {
         fetch_shader = &fetch;
