@@ -3,6 +3,54 @@ SPDX-FileCopyrightText: 2026 shadPS4 Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 -->
 
+# About this fork
+
+Upstream shadPS4 plus fixes not merged yet, for games we run on Linux (AMD, RADV). `main` is upstream `main` with the fix branches merged on top; each fix goes upstream as its own PR. No canary: only upstream `main` and our fixes.
+
+## Games
+
+These run with `main` and their game config (`custom_configs/<serial>.json`):
+
+| Game | Serial | Game config |
+| --- | --- | --- |
+| Marvel's Spider-Man: Miles Morales | CUSA17722 | `"GPU": { "readbacks_mode": 1, "readback_linear_images_enabled": true }` |
+| God of War | CUSA07410 | `"GPU": { "direct_memory_access_enabled": true, "readbacks_mode": 1, "unbounded_buffer_limit_mb": 64, "submit_draw_interval": 16 }` |
+| Shadow of the Tomb Raider | CUSA10872 | none |
+| Assassin's Creed Valhalla | CUSA18522 | none |
+| Days Gone | CUSA09175 | `"GPU": { "readbacks_mode": 1, "readback_linear_images_enabled": true, "readback_linear_images_deferred": true }` |
+
+## Fixes
+
+| Fix | For | Branch | Upstream |
+| --- | --- | --- | --- |
+| Off-chip and `DYNAMIC_HS` tessellation | Miles Morales | `fix/tess-dynamic-hs` | [#5738](https://github.com/shadps4-emu/shadPS4/pull/5738) |
+| Keep image address operands alive with a no-op | Miles Morales | `fix/flatbuf-permutation` | [#5739](https://github.com/shadps4-emu/shadPS4/pull/5739) |
+| Unmap texture cache images on the GPU thread | Miles Morales | `fix/texture-cache-unmap-race` | [#5745](https://github.com/shadps4-emu/shadPS4/pull/5745) |
+| `DS_ORDERED_COUNT`, by baggins183 | God of War | upstream PR head | [#5713](https://github.com/shadps4-emu/shadPS4/pull/5713) |
+| 32_32 image atomics on an `R64Uint` view | God of War | `fix/image-atomic-r64` | [#5768](https://github.com/shadps4-emu/shadPS4/pull/5768) |
+| T# dword 1 masked with an immediate | God of War | `fix/tsharp-and-dw1` | [#5769](https://github.com/shadps4-emu/shadPS4/pull/5769) |
+| Size limit for read-only unbounded buffers (audio) | God of War | `fix/unbounded-buffer-limit` | [#5770](https://github.com/shadps4-emu/shadPS4/pull/5770) |
+| Whole-wave reductions as subgroup operations, by jaime7981 | Shadow of the Tomb Raider | `fix/wave-reduction` (PR rebased on `main`) | [#5665](https://github.com/shadps4-emu/shadPS4/pull/5665) |
+| `S_SETPC_B64` through jump tables, by TrapEmAll | Assassin's Creed Valhalla | upstream PR head | [#5580](https://github.com/shadps4-emu/shadPS4/pull/5580) |
+| Reserve page states before updating region watchers | Assassin's Creed Valhalla | `fix/watcher-ensure-pages` | not yet: [#20](https://github.com/vjt/shadPS4/pull/20) |
+| Tile an image at its own address for unaligned texel buffers | Assassin's Creed Valhalla | `fix/texel-buffer-aliasing` | not yet: [#21](https://github.com/vjt/shadPS4/pull/21) |
+| Lock the top level in `MultiLevelPageTable::reserve` | Assassin's Creed Valhalla | `fix/page-table-reserve-lock` | not yet: [#22](https://github.com/vjt/shadPS4/pull/22) |
+| Render targets on degraded mips of macro tiled images | Assassin's Creed Valhalla | `fix/mipof-degraded-mips` | not yet: [#23](https://github.com/vjt/shadPS4/pull/23) |
+| Paired and 64-bit fragment LDS accesses | Days Gone | `fix/fs-lds-pairs` | not yet: [#24](https://github.com/vjt/shadPS4/pull/24) |
+| Read a cleared CMask as cleared | Days Gone | `fix/cmask-cleared` | not yet: [#25](https://github.com/vjt/shadPS4/pull/25) |
+| Dynamic `ReadConst` offsets without DMA (white flashes) | Days Gone | `fix/readconst-dynamic-window` | not yet: [#26](https://github.com/vjt/shadPS4/pull/26) |
+| Wait for linear image readbacks once per submit (14 to 18 FPS) | Days Gone | `fix/readback-images-per-submit` | not yet: [#28](https://github.com/vjt/shadPS4/pull/28) |
+| Drop page watchers when memory is mapped again (GPU timeout) | Days Gone | `fix/map-drops-watchers` | not yet: [#27](https://github.com/vjt/shadPS4/pull/27) |
+| Render targets of another width in the same slot (ghost frames with dynamic resolution) | Days Gone | `fix/dynres-subrect` | not yet: [#29](https://github.com/vjt/shadPS4/pull/29) |
+
+To follow upstream, `fork/sync.sh` rebuilds `main` on the current upstream `main` as `main-next` (fixes already merged upstream drop out). `fork/sync.sh --push` lets CI build it; it becomes `main` only once the games above have been tested with it.
+
+The fork's shader cache versions are upstream's plus 1000 (plus one more for each fork fix that changes the emitted shaders): the fixes change what the cache stores, so a cache written by an upstream build must not load in a fork build, or the other way round.
+
+CI here builds Windows and Linux only: the macOS jobs never finish on this fork, so the fork commit drops them. The workflow is kept disabled and `fork/sync.sh --push` turns it on only for the `main-next` push, so the fix branches do not start runs here; their CI runs upstream, on the PR.
+
+`fix/*` are the fixes in `main`, one branch per upstream PR; a fix not sent upstream yet is a draft PR here against `upstream-main`, a mirror of upstream `main`. `attic/*` are dead branches (superseded fixes, test builds), kept for reference only.
+
 <h1 align="center">
   <br>
   <a href="https://shadps4.net/"><img src="https://github.com/shadps4-emu/shadPS4/blob/main/.github/shadps4.png" width="220"></a>
