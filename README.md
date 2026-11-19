@@ -3,6 +3,35 @@ SPDX-FileCopyrightText: 2026 shadPS4 Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 -->
 
+# About this fork
+
+Upstream shadPS4 plus fixes not merged yet, for games we run on Linux (AMD, RADV). `main` is upstream `main` with the fix branches merged on top; each fix goes upstream as its own PR. No canary: only upstream `main` and our fixes.
+
+## Games
+
+These run with `main` and their game config (`custom_configs/<serial>.json`):
+
+| Game | Serial | Game config |
+| --- | --- | --- |
+| Marvel's Spider-Man: Miles Morales | CUSA17722 | `"GPU": { "readbacks_mode": 1, "readback_linear_images_enabled": true }` |
+| God of War | CUSA07410 | `"GPU": { "direct_memory_access_enabled": true, "readbacks_mode": 1, "unbounded_buffer_limit_mb": 64 }` |
+
+## Fixes
+
+| Fix | For | Branch | Upstream |
+| --- | --- | --- | --- |
+| Off-chip and `DYNAMIC_HS` tessellation | Miles Morales | `fix/tess-dynamic-hs` | [#5738](https://github.com/shadps4-emu/shadPS4/pull/5738) |
+| Keep image address operands alive with a no-op | Miles Morales | `fix/flatbuf-permutation` | [#5739](https://github.com/shadps4-emu/shadPS4/pull/5739) |
+| Unmap texture cache images on the GPU thread | Miles Morales | `fix/texture-cache-unmap-race` | [#5745](https://github.com/shadps4-emu/shadPS4/pull/5745) |
+| `DS_ORDERED_COUNT`, by baggins183 | God of War | upstream PR head | [#5713](https://github.com/shadps4-emu/shadPS4/pull/5713) |
+| 32_32 image atomics on an `R64Uint` view | God of War | `fix/image-atomic-r64` | [#5768](https://github.com/shadps4-emu/shadPS4/pull/5768) |
+| T# dword 1 masked with an immediate | God of War | `fix/tsharp-and-dw1` | [#5769](https://github.com/shadps4-emu/shadPS4/pull/5769) |
+| Size limit for read-only unbounded buffers (audio) | God of War | `fix/unbounded-buffer-limit` | not yet |
+
+To follow upstream, `fork/sync.sh` rebuilds `main` on the current upstream `main` as `main-next` (fixes already merged upstream drop out). `fork/sync.sh --push` lets CI build it; it becomes `main` only once the games above have been tested with it.
+
+CI here builds Windows and Linux only: the macOS jobs never finish on this fork, so the fork commit drops them.
+
 <h1 align="center">
   <br>
   <a href="https://shadps4.net/"><img src="https://github.com/shadps4-emu/shadPS4/blob/main/.github/shadps4.png" width="220"></a>
