@@ -3,6 +3,16 @@ SPDX-FileCopyrightText: 2026 shadPS4 Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 -->
 
+# About this fork
+
+Upstream shadPS4 plus fixes not merged yet, to run Marvel's Spider-Man: Miles Morales (CUSA17722) on Linux. `main` is upstream with the fix branches merged on top; each fix goes upstream as its own PR.
+
+| Fix | Branch | Upstream |
+| --- | --- | --- |
+| Off-chip and `DYNAMIC_HS` tessellation | `fix/tess-dynamic-hs` | [#5738](https://github.com/shadps4-emu/shadPS4/pull/5738) |
+| Keep image address operands alive with a no-op | `fix/flatbuf-keepalive` | [#5739](https://github.com/shadps4-emu/shadPS4/pull/5739) |
+| Unmap texture cache images on the GPU thread | `fix/texture-cache-unmap-race` | [#5745](https://github.com/shadps4-emu/shadPS4/pull/5745) |
+
 <h1 align="center">
   <br>
   <a href="https://shadps4.net/"><img src="https://github.com/shadps4-emu/shadPS4/blob/main/.github/shadps4.png" width="220"></a>
