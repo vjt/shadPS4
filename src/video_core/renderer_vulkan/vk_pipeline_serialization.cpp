@@ -12,9 +12,11 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 13u;
-static constexpr u32 ShaderMetaVersion = 7u;
-static constexpr u32 PipelineKeyVersion = 4u;
+/* Fork: upstream + 1000, so the caches of upstream and fork builds never mix; + 1 for each fork fix
+ * that changes the emitted shaders. */
+static constexpr u32 ShaderBinaryVersion = 1014u;
+static constexpr u32 ShaderMetaVersion = 1007u;
+static constexpr u32 PipelineKeyVersion = 1004u;
 } // namespace Serialization
 
 namespace Vulkan {
