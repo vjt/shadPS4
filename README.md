@@ -3,6 +3,21 @@ SPDX-FileCopyrightText: 2026 shadPS4 Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 -->
 
+# About this fork
+
+Upstream shadPS4 plus fixes not merged yet, for games we run on Linux (Marvel's Spider-Man: Miles Morales, God of War). `main` is upstream `main` with the fix branches merged on top; each fix goes upstream as its own PR. No canary: only upstream `main` and our fixes.
+
+| Fix | Branch | Upstream |
+| --- | --- | --- |
+| Off-chip and `DYNAMIC_HS` tessellation | `fix/tess-dynamic-hs` | [#5738](https://github.com/shadps4-emu/shadPS4/pull/5738) |
+| Keep image address operands alive with a no-op | `fix/flatbuf-permutation` | [#5739](https://github.com/shadps4-emu/shadPS4/pull/5739) |
+| Unmap texture cache images on the GPU thread | `fix/texture-cache-unmap-race` | [#5745](https://github.com/shadps4-emu/shadPS4/pull/5745) |
+| `DS_ORDERED_COUNT` (God of War), by baggins183 | upstream PR head | [#5713](https://github.com/shadps4-emu/shadPS4/pull/5713) |
+
+To follow upstream, `fork/sync.sh` rebuilds `main` on the current upstream `main` as `main-next` (fixes already merged upstream drop out). `fork/sync.sh --push` lets CI build it; it becomes `main` only once it has been tested.
+
+CI here builds Windows and Linux only: the macOS jobs never finish on this fork, so the fork commit drops them.
+
 <h1 align="center">
   <br>
   <a href="https://shadps4.net/"><img src="https://github.com/shadps4-emu/shadPS4/blob/main/.github/shadps4.png" width="220"></a>
