@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "common/thread.h"
@@ -111,10 +112,27 @@ s32 AjmContext::BatchWait(const u32 batch_id, const u32 timeout, AjmBatchError* 
         return ORBIS_AJM_ERROR_BUSY;
     }
 
+    // DIAG (gow-night): how the game waits on batches and how often they are not ready.
+    static std::atomic<u64> d_calls{0}, d_inf{0}, d_zero{0}, d_busy{0};
+    static std::atomic<u32> d_max_to{0};
+    d_calls++;
+    if (timeout == ORBIS_AJM_WAIT_INFINITE) d_inf++;
+    else if (timeout == 0) d_zero++;
+    else if (timeout > d_max_to) d_max_to = timeout;
+    const auto diag_report = [&] {
+        if ((d_calls % 1000) == 0) {
+            LOG_INFO(Lib_Ajm, "DIAG BatchWait calls={} infinite={} zero={} max_timeout={} "
+                     "in_progress={}", d_calls.load(), d_inf.load(), d_zero.load(),
+                     d_max_to.load(), d_busy.load());
+        }
+    };
+    diag_report();
+
     if (timeout == ORBIS_AJM_WAIT_INFINITE) {
         batch->finished.acquire();
     } else if (!batch->finished.try_acquire_for(std::chrono::milliseconds(timeout))) {
         batch->waiting = false;
+        d_busy++;
         return ORBIS_AJM_ERROR_IN_PROGRESS;
     }
 
