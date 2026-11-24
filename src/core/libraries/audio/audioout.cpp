@@ -929,6 +929,7 @@ s32 PS4_SYSV_ABI sceAudioOutOutputs(OrbisAudioOutOutputParam* param, u32 num) {
         }
     }
 
+    const u64 diag_t0 = Kernel::sceKernelGetProcessTime();
     // Wait for all ports to be ready
     for (u32 i = 0; i < num; i++) {
         ports[i]->output_waiters++;
@@ -939,6 +940,35 @@ s32 PS4_SYSV_ABI sceAudioOutOutputs(OrbisAudioOutOutputParam* param, u32 num) {
         if (ports[i]->closing) {
             LOG_DEBUG(Lib_AudioOut, "Port closed while waiting for drain");
             return ORBIS_AUDIO_OUT_ERROR_NOT_OPENED;
+        }
+    }
+
+    {
+        // DIAG (gow-night): guest cadence through sceAudioOutOutputs.
+        static u64 window{}, last_ret{}, calls{}, max_wait{}, max_guest{}, late{}, sum_guest{},
+            sum_wait{};
+        const u64 now = Kernel::sceKernelGetProcessTime();
+        const u64 period = 1000000ULL * buffer_frames / 48000;
+        calls++;
+        max_wait = std::max<u64>(max_wait, now - diag_t0);
+        sum_wait += now - diag_t0;
+        if (last_ret != 0) {
+            const u64 guest = diag_t0 - last_ret;
+            max_guest = std::max<u64>(max_guest, guest);
+            sum_guest += guest;
+            late += guest > period ? 1 : 0;
+        }
+        last_ret = now;
+        if (window == 0) {
+            window = now;
+        }
+        if (now - window >= 2000000) {
+            LOG_INFO(Lib_AudioOut,
+                     "DIAG outputs num={} calls={} wait[avg,max]=[{},{}]us guest[avg,max]=[{},{}]us "
+                     "guest>period={}",
+                     num, calls, sum_wait / calls, max_wait, sum_guest / calls, max_guest, late);
+            window = now;
+            calls = max_wait = max_guest = late = sum_guest = sum_wait = 0;
         }
     }
 
