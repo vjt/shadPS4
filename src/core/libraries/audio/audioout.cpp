@@ -792,11 +792,44 @@ s32 PS4_SYSV_ABI sceAudioOutOutput(s32 handle, void* ptr) {
     }
 
     s32 samples_sent = 0;
+    // DIAG (gow-night): guest cadence on this port.
+    struct DiagCad {
+        u64 window{}, last_ret{}, calls{}, max_wait{}, max_guest{}, late{}, sum_guest{};
+    };
+    static DiagCad diag_cad[32];
+    const u64 diag_t0 = Kernel::sceKernelGetProcessTime();
     {
         std::unique_lock lock{port->mutex};
         port->output_waiters++;
         port->output_cv.wait(lock, [&] { return !port->output_ready || port->closing; });
         port->output_waiters--;
+        {
+            auto& d = diag_cad[port_id & 31];
+            const u64 now = Kernel::sceKernelGetProcessTime();
+            const u64 period = 1000000ULL * port->buffer_frames / port->sample_rate;
+            d.calls++;
+            d.max_wait = std::max<u64>(d.max_wait, now - diag_t0);
+            if (d.last_ret != 0) {
+                const u64 guest = diag_t0 - d.last_ret;
+                d.max_guest = std::max<u64>(d.max_guest, guest);
+                d.sum_guest += guest;
+                if (guest > period) {
+                    d.late++;
+                }
+            }
+            d.last_ret = now;
+            if (d.window == 0) {
+                d.window = now;
+            }
+            if (now - d.window >= 2000000) {
+                LOG_INFO(Lib_AudioOut,
+                         "DIAG guest port {} calls={} max_wait={}us guest[avg,max]=[{},{}]us "
+                         "guest>period={} period={}us",
+                         port_id, d.calls, d.max_wait, d.sum_guest / std::max<u64>(d.calls, 1),
+                         d.max_guest, d.late, period);
+                d = DiagCad{.window = now, .last_ret = now};
+            }
+        }
 
         if (port->closing) {
             LOG_DEBUG(Lib_AudioOut, "Port {} closed while waiting for drain", port_id);
