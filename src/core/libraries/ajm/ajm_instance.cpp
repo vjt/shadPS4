@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
 #include "ajm_aac.h"
 #include "ajm_at9.h"
 #include "ajm_instance.h"
@@ -142,6 +143,22 @@ void AjmInstance::ExecuteJob(AjmJob& job) {
             if (False(job.flags.run_flags & AjmJobRunFlags::MultipleFrames)) {
                 break;
             }
+        }
+    }
+
+    {
+        // DIAG (gow-night): per-job trace for the first jobs of each instance.
+        static std::atomic<u32> diag_jobs{0};
+        if (diag_jobs.fetch_add(1, std::memory_order_relaxed) < 3000) {
+            LOG_INFO(Lib_Ajm,
+                     "DIAG job inst={} ctl={:#x} run={:#x} in={} used={} out={} written={} "
+                     "frames={} result={:#x} gapless init[skip={},total={}] cur[skip={},total={}] "
+                     "total_samples={}",
+                     job.instance_id, u32(control_flags), u32(job.flags.run_flags), in_size,
+                     in_size - in_buf.size(), out_size, out_size - out_buf.Size(), frames_decoded,
+                     u32(job.output.p_result->result), m_gapless.init.skip_samples,
+                     m_gapless.init.total_samples, m_gapless.current.skip_samples,
+                     m_gapless.current.total_samples, m_total_samples);
         }
     }
 

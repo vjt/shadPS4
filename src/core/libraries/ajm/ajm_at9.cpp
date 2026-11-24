@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdio>
+#include <cstdlib>
 #include "ajm_result.h"
 #include "common/assert.h"
 #include "core/libraries/ajm/ajm_at9.h"
@@ -58,6 +60,9 @@ AjmAt9Decoder::AjmAt9Decoder(AjmFormatEncoding format, AjmAt9CodecFlags flags, u
     : m_format(format), m_flags(flags), m_handle(Atrac9GetHandle()) {}
 
 AjmAt9Decoder::~AjmAt9Decoder() {
+    if (m_diag_file != nullptr) {
+        std::fclose(m_diag_file);
+    }
     Atrac9ReleaseHandle(m_handle);
 }
 
@@ -212,6 +217,24 @@ DecoderResult AjmAt9Decoder::ProcessData(std::span<u8>& in_buf, SparseOutputBuff
 
     result.frames_decoded += 1;
     in_buf = in_buf.subspan(bytes_used);
+
+    // DIAG (gow-night): dump every decoded frame (pre-skip) per decoder.
+    if (static const char* dir = std::getenv("SHADPS4_AJM_DUMP"); dir != nullptr) {
+        if (m_diag_file == nullptr && m_diag_bytes == 0) {
+            const auto name = fmt::format("{}/at9_{:x}_{}ch_{}hz_fmt{}.raw", dir,
+                                          reinterpret_cast<uintptr_t>(this), m_codec_info.channels,
+                                          m_codec_info.samplingRate, static_cast<int>(m_format));
+            m_diag_file = std::fopen(name.c_str(), "wb");
+        }
+        if (m_diag_file != nullptr) {
+            std::fwrite(m_pcm_buffer.data(), 1, m_pcm_buffer.size(), m_diag_file);
+            m_diag_bytes += m_pcm_buffer.size();
+            if (m_diag_bytes > (16u << 20)) {
+                std::fclose(m_diag_file);
+                m_diag_file = nullptr;
+            }
+        }
+    }
 
     m_superframe_bytes_remain -= bytes_used;
 

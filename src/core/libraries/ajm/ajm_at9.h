@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdio>
 #include "common/enum.h"
 #include "common/types.h"
 #include "core/libraries/ajm/ajm_instance.h"
@@ -62,6 +63,8 @@ private:
     u32 m_num_frames{};
     Atrac9CodecInfo m_codec_info{};
     std::vector<u8> m_pcm_buffer;
+    std::FILE* m_diag_file{};
+    size_t m_diag_bytes{};
 };
 
 } // namespace Libraries::Ajm
