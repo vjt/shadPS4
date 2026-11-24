@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <fmt/format.h>
 #include <atomic>
 #include <cstring>
 #include <memory>
@@ -85,6 +88,23 @@ public:
         const u64 current_time = Kernel::sceKernelGetProcessTime();
         DiagOutput(current_time);
         convert(ptr, internal_buffer, buffer_frames, nullptr);
+        // DIAG (gow-night): dump what goes to SDL, per port.
+        if (static const char* dir = std::getenv("SHADPS4_AOUT_DUMP"); dir != nullptr) {
+            if (diag_file == nullptr && diag_dumped == 0) {
+                const auto name =
+                    fmt::format("{}/aout_{:x}_{}ch.raw", dir, reinterpret_cast<uintptr_t>(this),
+                                internal_buffer_size / buffer_frames / sizeof(float));
+                diag_file = std::fopen(name.c_str(), "wb");
+            }
+            if (diag_file != nullptr) {
+                std::fwrite(internal_buffer, 1, internal_buffer_size, diag_file);
+                diag_dumped += internal_buffer_size;
+                if (diag_dumped > (48u << 20)) {
+                    std::fclose(diag_file);
+                    diag_file = nullptr;
+                }
+            }
+        }
         HandleTiming(current_time);
 
         if ((output_count++ & 0xF) == 0) { // Check every 16 outputs
@@ -781,6 +801,8 @@ private:
     u64 diag_max_gap{0};
     s64 diag_min_q{INT64_MAX};
     s64 diag_max_q{0};
+    std::FILE* diag_file{nullptr};
+    size_t diag_dumped{0};
 };
 
 std::unique_ptr<PortBackend> SDLAudioOut::Open(PortOut& port) {
