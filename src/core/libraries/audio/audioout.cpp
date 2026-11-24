@@ -305,6 +305,10 @@ static void AudioOutputThread(std::shared_ptr<PortOut> port, const std::stop_tok
     while (true) {
         timer.Start();
 
+        // The backend's Output() may sleep to pace itself: it runs outside port->mutex, so the
+        // game's sceAudioOutGetPortState and friends never wait for it. The output buffer and the
+        // backend stay alive until this thread is stopped (see PortClose).
+        bool have_output = false;
         {
             std::unique_lock lock{port->mutex};
             if (!port->impl || stop.stop_requested()) {
@@ -324,14 +328,19 @@ static void AudioOutputThread(std::shared_ptr<PortOut> port, const std::stop_tok
                     ApplyGain(port->output_buffer, port->buffer_frames, port->format_info,
                               mix_gain);
                 }
-                port->impl->Output(port->output_buffer);
                 port->output_ready = false;
-                port->last_output_time =
-                    Kernel::sceKernelGetProcessTime(); // moved from sceAudioOutOutput TOOD recheck
+                have_output = true;
             }
         }
 
         port->output_cv.notify_all();
+
+        if (have_output) {
+            port->impl->Output(port->output_buffer);
+            std::unique_lock lock{port->mutex};
+            port->last_output_time =
+                Kernel::sceKernelGetProcessTime(); // moved from sceAudioOutOutput TOOD recheck
+        }
 
         if (stop.stop_requested()) {
             break;
