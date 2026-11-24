@@ -83,6 +83,7 @@ public:
 
         UpdateVolumeIfChanged();
         const u64 current_time = Kernel::sceKernelGetProcessTime();
+        DiagOutput(current_time);
         convert(ptr, internal_buffer, buffer_frames, nullptr);
         HandleTiming(current_time);
 
@@ -224,6 +225,47 @@ private:
         }
     }
 
+    // DIAG (gow-night): device-side underruns via the get callback, output cadence.
+    static void SDLCALL DiagGetCallback(void* userdata, SDL_AudioStream*, int additional_amount,
+                                        int total_amount) {
+        auto* self = static_cast<SDLPortBackend*>(userdata);
+        self->diag_pulls.fetch_add(1, std::memory_order_relaxed);
+        if (additional_amount > 0) {
+            self->diag_underruns.fetch_add(1, std::memory_order_relaxed);
+            self->diag_missing.fetch_add(additional_amount, std::memory_order_relaxed);
+        }
+        self->diag_pull_bytes.store(total_amount, std::memory_order_relaxed);
+    }
+
+    void DiagOutput(u64 now) {
+        const int queued = SDL_GetAudioStreamQueued(stream);
+        diag_min_q = std::min<s64>(diag_min_q, queued);
+        diag_max_q = std::max<s64>(diag_max_q, queued);
+        if (diag_last != 0) {
+            diag_max_gap = std::max<u64>(diag_max_gap, now - diag_last);
+        }
+        diag_last = now;
+        diag_outputs++;
+        if (diag_window == 0) {
+            diag_window = now;
+        }
+        if (now - diag_window >= 2000000) {
+            const u32 fb = internal_buffer_size / buffer_frames;
+            LOG_INFO(Lib_AudioOut,
+                     "DIAG port {}ch {}f: outputs={} pulls={} pull={}f underruns={} missing={}f "
+                     "q[min,max]=[{},{}]f max_gap={}us period={}us",
+                     num_channels, buffer_frames, diag_outputs, diag_pulls.exchange(0),
+                     diag_pull_bytes.load() / fb, diag_underruns.exchange(0),
+                     diag_missing.exchange(0) / fb, diag_min_q / fb, diag_max_q / fb, diag_max_gap,
+                     period_us);
+            diag_window = now;
+            diag_outputs = 0;
+            diag_min_q = INT64_MAX;
+            diag_max_q = 0;
+            diag_max_gap = 0;
+        }
+    }
+
     void HandleTiming(u64 current_time) {
         if (next_output_time == 0) [[unlikely]] {
             // First output - set initial timing
@@ -256,7 +298,7 @@ private:
         const auto queued = SDL_GetAudioStreamQueued(stream);
 
         if (queued >= queue_threshold) [[unlikely]] {
-            LOG_DEBUG(Lib_AudioOut, "Clearing backed up audio queue ({} >= {})", queued,
+            LOG_INFO(Lib_AudioOut, "DIAG Clearing backed up audio queue ({} >= {})", queued,
                       queue_threshold);
             SDL_ClearAudioStream(stream);
             CalculateQueueThreshold();
@@ -332,6 +374,8 @@ private:
             stream = nullptr;
             return false;
         }
+
+        SDL_SetAudioStreamGetCallback(stream, &SDLPortBackend::DiagGetCallback, this);
 
         // Set initial volume
         const float initial_gain = current_gain.load(std::memory_order_relaxed);
@@ -725,6 +769,18 @@ private:
     // SDL audio stream
     SDL_AudioStream* stream{nullptr};
     u32 queue_threshold{0};
+
+    // DIAG (gow-night)
+    std::atomic<u64> diag_pulls{0};
+    std::atomic<u64> diag_underruns{0};
+    std::atomic<u64> diag_missing{0};
+    std::atomic<int> diag_pull_bytes{0};
+    u64 diag_window{0};
+    u64 diag_last{0};
+    u64 diag_outputs{0};
+    u64 diag_max_gap{0};
+    s64 diag_min_q{INT64_MAX};
+    s64 diag_max_q{0};
 };
 
 std::unique_ptr<PortBackend> SDLAudioOut::Open(PortOut& port) {
