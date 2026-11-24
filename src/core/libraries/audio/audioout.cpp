@@ -849,9 +849,7 @@ s32 PS4_SYSV_ABI sceAudioOutOutputs(OrbisAudioOutOutputParam* param, u32 num) {
     }
 
     std::vector<std::shared_ptr<PortOut>> ports;
-    std::vector<std::unique_lock<std::mutex>> locks;
     ports.reserve(num);
-    locks.reserve(num);
 
     u32 buffer_frames = 0;
 
@@ -894,7 +892,6 @@ s32 PS4_SYSV_ABI sceAudioOutOutputs(OrbisAudioOutOutputParam* param, u32 num) {
             }
 
             ports.push_back(port);
-            locks.emplace_back(port->mutex);
 
             // Check consistent buffer size
             if (i == 0) {
@@ -908,8 +905,9 @@ s32 PS4_SYSV_ABI sceAudioOutOutputs(OrbisAudioOutOutputParam* param, u32 num) {
 
     // Wait for all ports to be ready
     for (u32 i = 0; i < num; i++) {
+        std::unique_lock lock{ports[i]->mutex};
         ports[i]->output_waiters++;
-        ports[i]->output_cv.wait(locks[i],
+        ports[i]->output_cv.wait(lock,
                                  [&] { return !ports[i]->output_ready || ports[i]->closing; });
         ports[i]->output_waiters--;
 
@@ -921,6 +919,7 @@ s32 PS4_SYSV_ABI sceAudioOutOutputs(OrbisAudioOutOutputParam* param, u32 num) {
 
     // Copy data to all ports
     for (u32 i = 0; i < num; i++) {
+        std::unique_lock lock{ports[i]->mutex};
         if (param[i].ptr != nullptr) {
             ports[i]->output_src = param[i].ptr;
             ports[i]->output_ready = true;
