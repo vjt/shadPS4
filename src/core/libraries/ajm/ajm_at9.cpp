@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <fmt/format.h>
 #include "ajm_result.h"
 #include "common/assert.h"
 #include "core/libraries/ajm/ajm_at9.h"
