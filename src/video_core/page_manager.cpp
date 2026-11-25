@@ -41,6 +41,8 @@ struct PageManager::Impl {
     struct PageState {
         u8 num_write_watchers;
         u8 num_read_watchers;
+        u8 dbg_tex;
+        u8 dbg_reg;
 
         Core::MemoryPermission WritePerm() const noexcept {
             return num_write_watchers == 0 ? Core::MemoryPermission::Write
@@ -65,9 +67,9 @@ struct PageManager::Impl {
             }
         }
 
-        constexpr Core::MemoryPermission Update(PageOp write_op, bool update_write = true,
-                                                PageOp read_op = PageOp::None,
-                                                bool update_read = false) {
+        Core::MemoryPermission Update(PageOp write_op, bool update_write = true,
+                                      PageOp read_op = PageOp::None, bool update_read = false,
+                                      bool from_region = false, u64 page = 0) {
             if (update_read) {
                 if (read_op == PageOp::Track) {
                     ASSERT_MSG(num_read_watchers == 0, "Too many watchers");
@@ -77,12 +79,24 @@ struct PageManager::Impl {
                 num_read_watchers += std::to_underlying(read_op);
             }
             if (update_write) {
+                u8& dbg = from_region ? dbg_reg : dbg_tex;
+                const bool under = write_op == PageOp::Untrack && num_write_watchers == 0;
+                const bool dbg_under = write_op == PageOp::Untrack && dbg == 0;
+                if (under || dbg_under) {
+                    LOG_ERROR(Render,
+                              "WATCHDBG underflow page={:#x} from={} total={} tex={} reg={}",
+                              page << PM_PAGE_BITS, from_region ? "region" : "texture",
+                              num_write_watchers, dbg_tex, dbg_reg);
+                }
                 if (write_op == PageOp::Track) {
                     ASSERT_MSG(num_write_watchers < 255, "Too many watchers");
-                } else if (write_op == PageOp::Untrack) {
-                    ASSERT_MSG(num_write_watchers > 0, "Not enough watchers");
                 }
-                num_write_watchers += std::to_underlying(write_op);
+                if (!under) {
+                    num_write_watchers += std::to_underlying(write_op);
+                }
+                if (!dbg_under) {
+                    dbg += std::to_underlying(write_op);
+                }
             }
             return Perms();
         }
@@ -156,7 +170,7 @@ struct PageManager::Impl {
             }
 
             // Apply the change to the page state
-            const auto new_perms = state->Update(write_op);
+            const auto new_perms = state->Update(write_op, true, PageOp::None, false, false, page);
             if (new_perms != perms) [[unlikely]] {
                 // If the protection changed add pending (un)protect action
                 release_pending();
@@ -223,7 +237,8 @@ struct PageManager::Impl {
             // Apply the change to the page state
             const bool update_write = write_op != PageOp::None && write_mask.GetPage(page);
             const bool update_read = read_op != PageOp::None && read_mask.GetPage(page);
-            const auto new_perms = state->Update(write_op, update_write, read_op, update_read);
+            const auto new_perms =
+                state->Update(write_op, update_write, read_op, update_read, true, base_page + page);
 
             if (new_perms != perms) [[unlikely]] {
                 // If the protection changed add pending (un)protect action
