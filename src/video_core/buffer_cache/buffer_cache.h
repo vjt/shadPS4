@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include <array>
 #include <deque>
+#include <functional>
+#include <vector>
 #include <boost/container/small_vector.hpp>
 
 #include "common/enum.h"
@@ -164,6 +167,9 @@ private:
     Buffer gds_buffer;
     std::unique_ptr<Buffer> null_index_buffer;
     RangeSet gpu_modified_ranges;
+    std::vector<std::function<void()>> pending_downloads;
+    std::array<VAddr, 16> recent_windows{};
+    u32 recent_window_next{};
 
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;

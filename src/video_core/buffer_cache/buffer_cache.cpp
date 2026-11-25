@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <magic_enum/magic_enum.hpp>
 #include <xxhash.h>
 
@@ -136,19 +137,55 @@ void BufferCache::UnmarkRegionAsGpuModified(VAddr device_addr, u64 size, bool is
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool async,
                              bool assume_locks) {
     const auto flush_request = [this, device_addr, size, is_write, async] {
-        const u32 first_block = device_addr >> block_shift;
-        const u32 last_block = (device_addr + size - 1) >> block_shift;
-        const auto* arena = GetArena(first_block, last_block);
-
         // GPU-modified ranges come as many small scattered islands,
         // so the download is widened to a window around the request
         constexpr u64 WindowSize = 512_KB;
-        const VAddr arena_end = arena->cpu_addr + arena->size_bytes;
-        const VAddr window_start =
-            std::max<VAddr>(Common::AlignDown(device_addr, WindowSize), arena->cpu_addr);
-        const VAddr window_end = std::min<VAddr>(
-            std::max<VAddr>(window_start + WindowSize, device_addr + size), arena_end);
-        DownloadMemory(arena, window_start, window_end - window_start, async);
+        const auto download_window = [&](VAddr addr, u64 len) {
+            const u32 first_block = addr >> block_shift;
+            const u32 last_block = (addr + len - 1) >> block_shift;
+            const auto* arena = GetArena(first_block, last_block);
+            const VAddr arena_end = arena->cpu_addr + arena->size_bytes;
+            const VAddr window_start =
+                std::max<VAddr>(Common::AlignDown(addr, WindowSize), arena->cpu_addr);
+            const VAddr window_end =
+                std::min<VAddr>(std::max<VAddr>(window_start + WindowSize, addr + len), arena_end);
+            DownloadMemory(arena, window_start, window_end - window_start, async);
+        };
+        download_window(device_addr, size);
+        if (!async) {
+            // The same windows fault again every frame, each with its own wait for the GPU:
+            // bring the recent ones down in the same wait
+            const VAddr window = Common::AlignDown(device_addr, WindowSize);
+            static const bool batch = !std::getenv("RB_NOBATCH");
+            for (const VAddr recent : recent_windows) {
+                if (batch && recent != window && recent != 0) {
+                    download_window(recent, WindowSize);
+                }
+            }
+            if (std::ranges::find(recent_windows, window) == recent_windows.end()) {
+                recent_windows[recent_window_next++ % recent_windows.size()] = window;
+            }
+            if (!pending_downloads.empty()) {
+                static u64 n = 0, nd = 0, ns = 0;
+                static auto last = std::chrono::steady_clock::now();
+                const auto t0 = std::chrono::steady_clock::now();
+                scheduler.Finish();
+                for (const auto& write_data : pending_downloads) {
+                    write_data();
+                }
+                const auto t1 = std::chrono::steady_clock::now();
+                n++;
+                nd += pending_downloads.size();
+                ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+                if (t1 - last >= std::chrono::seconds(1)) {
+                    fprintf(stderr, "RBSTAT waits=%llu downloads=%llu wait_ms=%llu\n",
+                            (unsigned long long)n, (unsigned long long)nd,
+                            (unsigned long long)(ns / 1000000));
+                    last = t1;
+                }
+                pending_downloads.clear();
+            }
+        }
         if (is_write) {
             memory_tracker->MarkRegionAsCpuModified(device_addr, size);
         }
@@ -191,8 +228,8 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
     }
     runtime.CopyBuffer(arena, download.buffer, copies);
 
-    const auto write_data = [this, arena_base, device_addr, size, download, async,
-                             copies = std::move(copies)] {
+    auto write_data = [this, arena_base, device_addr, size, download, async,
+                       copies = std::move(copies)] {
         download.Invalidate();
         for (const auto& copy : copies) {
             auto* dst_addr = std::bit_cast<u8*>(arena_base + copy.srcOffset);
@@ -209,26 +246,8 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
     if (async) {
         scheduler.DeferOperation(std::move(write_data));
     } else {
-        static u64 n = 0, bytes = 0, ns = 0, ncopies = 0;
-        static auto last = std::chrono::steady_clock::now();
-        const auto t0 = std::chrono::steady_clock::now();
-        scheduler.Finish();
-        write_data();
-        const auto t1 = std::chrono::steady_clock::now();
-        n++;
-        bytes += total_size_bytes;
-        ncopies += copies.size();
-        ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
-        if (n <= 400) {
-            fprintf(stderr, "RBDL addr=%llx size=%llx bytes=%llu\n", (unsigned long long)device_addr,
-                    (unsigned long long)size, (unsigned long long)total_size_bytes);
-        }
-        if (t1 - last >= std::chrono::seconds(1)) {
-            fprintf(stderr, "RBSTAT downloads=%llu copies=%llu bytes=%llu wait_ms=%llu\n",
-                    (unsigned long long)n, (unsigned long long)ncopies, (unsigned long long)bytes,
-                    (unsigned long long)(ns / 1000000));
-            last = t1;
-        }
+        // The caller waits for the GPU once and then runs these
+        pending_downloads.emplace_back(std::move(write_data));
     }
 }
 
