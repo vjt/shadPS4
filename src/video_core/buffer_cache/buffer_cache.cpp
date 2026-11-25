@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <magic_enum/magic_enum.hpp>
 #include <xxhash.h>
 
@@ -121,7 +125,24 @@ void BufferCache::TickFrame() {
 }
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
+    static const bool nowait = std::getenv("RB_NOWAIT") != nullptr;
     memory_tracker->InvalidateRegion(device_addr, size, [this, device_addr, size, assume_locks] {
+        if (nowait) {
+            // Keep the page as it was before the CPU write: the upload sends only what changed,
+            // the GPU data around it stays in the buffer and nobody waits for a download
+            const VAddr page = Common::AlignDown(device_addr, 4_KB);
+            {
+                std::scoped_lock lk{snapshot_mutex};
+                auto& snapshot = page_snapshots[page];
+                if (!snapshot) {
+                    snapshot = std::make_unique<u8[]>(4_KB);
+                    std::memcpy(snapshot.get(), std::bit_cast<const u8*>(page), 4_KB);
+                    ++rb_snapshots;
+                }
+            }
+            memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+            return;
+        }
         ReadMemory(device_addr, size, true, false, assume_locks);
     });
 }
@@ -449,21 +470,73 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
 
 bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size,
                                     bool is_written, bool is_texel_buffer) {
-    boost::container::small_vector<vk::BufferCopy, 4> copies;
+    boost::container::small_vector<vk::BufferCopy, 4> ranges;
     size_t total_size_bytes{};
     memory_tracker->ForEachUploadRange(device_addr, size, is_written, [&](u64 addr, u64 size) {
-        copies.emplace_back(total_size_bytes, addr, size);
+        ranges.emplace_back(total_size_bytes, addr, size);
         total_size_bytes += size;
     });
-    if (!copies.empty()) {
+    if (!ranges.empty()) {
+        boost::container::small_vector<vk::BufferCopy, 4> copies;
         const auto staging = staging_pool.Request(total_size_bytes, MemoryType::HostUncached);
-        for (auto& copy : copies) {
-            memory->CopySparseMemory(copy.dstOffset, staging.mapped + copy.srcOffset, copy.size);
-            copy.srcOffset += staging.offset;
-            copy.dstOffset -= arena->cpu_addr;
+        std::scoped_lock lk{snapshot_mutex};
+        for (const auto& range : ranges) {
+            const u8* data = staging.mapped + range.srcOffset;
+            memory->CopySparseMemory(range.dstOffset, staging.mapped + range.srcOffset, range.size);
+            const auto emit = [&](u64 begin, u64 end) {
+                if (begin != end) {
+                    copies.emplace_back(staging.offset + range.srcOffset + begin,
+                                        range.dstOffset + begin - arena->cpu_addr, end - begin);
+                }
+            };
+            u64 whole_begin = 0;
+            for (u64 offset = 0; !page_snapshots.empty() && offset < range.size; offset += 4_KB) {
+                const auto it = page_snapshots.find(range.dstOffset + offset);
+                if (it == page_snapshots.end()) {
+                    continue;
+                }
+                emit(whole_begin, offset);
+                whole_begin = offset + 4_KB;
+                // Only the bytes the CPU changed since the snapshot
+                const u8* old_data = it->second.get();
+                const u8* new_data = data + offset;
+                u64 run = 4_KB;
+                for (u64 i = 0; i < 4_KB; i += 4) {
+                    const bool differs = std::memcmp(old_data + i, new_data + i, 4) != 0;
+                    if (differs && run == 4_KB) {
+                        run = i;
+                    } else if (!differs && run != 4_KB) {
+                        emit(offset + run, offset + i);
+                        rb_diff_bytes += i - run;
+                        ++rb_diff_copies;
+                        run = 4_KB;
+                    }
+                }
+                if (run != 4_KB) {
+                    emit(offset + run, offset + 4_KB);
+                    rb_diff_bytes += 4_KB - run;
+                    ++rb_diff_copies;
+                }
+                page_snapshots.erase(it);
+                ++rb_merged;
+            }
+            emit(whole_begin, range.size);
         }
-        staging.Flush();
-        runtime.CopyBuffer(staging.buffer, arena, copies);
+        if (rb_snapshots) {
+            static auto last = std::chrono::steady_clock::now();
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last >= std::chrono::seconds(1)) {
+                fprintf(stderr, "RBNOWAIT snapshots=%llu merged=%llu copies=%llu bytes=%llu live=%zu\n",
+                        (unsigned long long)rb_snapshots.load(), (unsigned long long)rb_merged,
+                        (unsigned long long)rb_diff_copies, (unsigned long long)rb_diff_bytes,
+                        page_snapshots.size());
+                last = now;
+            }
+        }
+        if (!copies.empty()) {
+            staging.Flush();
+            runtime.CopyBuffer(staging.buffer, arena, copies);
+        }
     }
     if (is_texel_buffer && !is_written) {
         return SynchronizeMemoryFromImage(arena, device_addr, size);

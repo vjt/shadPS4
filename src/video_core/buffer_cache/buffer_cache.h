@@ -3,7 +3,11 @@
 
 #pragma once
 
+#include <atomic>
 #include <deque>
+#include <memory>
+#include <mutex>
+#include <unordered_map>
 #include <boost/container/small_vector.hpp>
 
 #include "common/enum.h"
@@ -164,6 +168,10 @@ private:
     Buffer gds_buffer;
     std::unique_ptr<Buffer> null_index_buffer;
     RangeSet gpu_modified_ranges;
+    std::mutex snapshot_mutex;
+    std::unordered_map<VAddr, std::unique_ptr<u8[]>> page_snapshots;
+    std::atomic<u64> rb_snapshots{};
+    u64 rb_merged{}, rb_diff_copies{}, rb_diff_bytes{};
 
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
