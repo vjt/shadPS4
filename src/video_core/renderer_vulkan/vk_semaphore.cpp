@@ -4,6 +4,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
+#include <mutex>
 #include <limits>
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
@@ -47,7 +49,7 @@ void Semaphore::Refresh() {
                                              std::memory_order_relaxed));
 }
 
-void Semaphore::Wait(u64 tick) {
+void Semaphore::Wait(u64 tick, const char* who) {
     // No need to wait if the GPU is ahead of the tick
     if (IsFree(tick)) {
         return;
@@ -65,19 +67,38 @@ void Semaphore::Wait(u64 tick) {
         .pValues = &tick,
     };
 
-    static std::atomic<u64> waits{}, wait_ns{};
-    static std::atomic<s64> last_print{};
     const auto t0 = std::chrono::steady_clock::now();
     while (instance.GetDevice().waitSemaphores(&wait_info, WAIT_TIMEOUT) != vk::Result::eSuccess) {
     }
     const auto t1 = std::chrono::steady_clock::now();
-    ++waits;
-    wait_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
-    const s64 now_s =
-        std::chrono::duration_cast<std::chrono::seconds>(t1.time_since_epoch()).count();
-    if (last_print.exchange(now_s) != now_s) {
-        fprintf(stderr, "WAITSTAT waits=%llu wait_ms=%llu\n", (unsigned long long)waits.load(),
-                (unsigned long long)(wait_ns.load() / 1000000));
+    struct Slot {
+        const char* who;
+        u64 waits, ns;
+    };
+    static std::mutex m;
+    static Slot slots[32]{};
+    static s64 last_print{};
+    {
+        std::scoped_lock lk{m};
+        for (auto& sl : slots) {
+            if (!sl.who || !strcmp(sl.who, who)) {
+                sl.who = who;
+                ++sl.waits;
+                sl.ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+                break;
+            }
+        }
+        const s64 now_s =
+            std::chrono::duration_cast<std::chrono::seconds>(t1.time_since_epoch()).count();
+        if (now_s >= last_print + 5) {
+            last_print = now_s;
+            for (const auto& sl : slots) {
+                if (sl.who) {
+                    fprintf(stderr, "WAITSTAT who=%s waits=%llu wait_ms=%llu\n", sl.who,
+                            (unsigned long long)sl.waits, (unsigned long long)(sl.ns / 1000000));
+                }
+            }
+        }
     }
     Refresh();
 }

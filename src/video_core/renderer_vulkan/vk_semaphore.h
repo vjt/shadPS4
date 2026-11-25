@@ -44,7 +44,7 @@ public:
     void Refresh();
 
     /// Waits for a tick to be hit on the GPU
-    void Wait(u64 tick);
+    void Wait(u64 tick, const char* who = "other");
 
 protected:
     const Instance& instance;
