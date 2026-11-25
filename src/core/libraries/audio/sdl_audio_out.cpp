@@ -99,7 +99,7 @@ public:
             if (diag_file != nullptr) {
                 std::fwrite(internal_buffer, 1, internal_buffer_size, diag_file);
                 diag_dumped += internal_buffer_size;
-                if (diag_dumped > (200u << 20)) {
+                if (diag_dumped > (600u << 20)) {
                     std::fclose(diag_file);
                     diag_file = nullptr;
                 }
