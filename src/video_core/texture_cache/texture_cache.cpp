@@ -95,6 +95,45 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
 
 TextureCache::~TextureCache() = default;
 
+bool TextureCache::DeferFence(std::function<void()>&& signal) {
+    static const char* mode = getenv("RB_IMG_ASYNC");
+    if (!mode || mode[0] != 'd') {
+        return false;
+    }
+    static u64 deferred, chained, direct;
+    if ((deferred + chained + direct) % 200000 == 0) {
+        fprintf(stderr, "FENCESTAT deferred=%llu chained=%llu direct=%llu\n",
+                (unsigned long long)deferred, (unsigned long long)chained,
+                (unsigned long long)direct);
+    }
+    std::unique_lock lk{download_images_mutex};
+    auto op = [this, signal = std::move(signal)] {
+        signal();
+        --outstanding_fences;
+    };
+    if (download_images.empty()) {
+        if (outstanding_fences == 0) {
+            ++direct;
+            return false;
+        }
+        // Keep the fences in order behind the one that waits for its downloads.
+        ++chained;
+        ++outstanding_fences;
+        scheduler.DeferPriorityOperation(std::move(op), last_fence_tick);
+        return true;
+    }
+    ++deferred;
+    for (const ImageId image_id : download_images) {
+        DownloadImageMemory(image_id, DownloadMemoryFlags::Priority);
+    }
+    download_images.clear();
+    last_fence_tick = scheduler.CurrentTick();
+    ++outstanding_fences;
+    scheduler.DeferPriorityOperation(std::move(op));
+    scheduler.Flush();
+    return true;
+}
+
 void TextureCache::ProcessDownloadImages(bool at_fence) {
     static const char* mode = getenv("RB_IMG_ASYNC");
     static u64 calls[2], busy[2];

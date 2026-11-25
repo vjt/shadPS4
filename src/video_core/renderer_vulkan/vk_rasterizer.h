@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <functional>
+
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -83,6 +85,7 @@ public:
     void Finish();
     void OnSubmit();
     void OnFence();
+    bool DeferFence(std::function<void()>&& signal);
 
     PipelineCache& GetPipelineCache() {
         return pipeline_cache;
