@@ -324,9 +324,6 @@ struct PortOut {
     std::unique_ptr<PortBackend> impl{};
 
     void* output_buffer = nullptr;
-    // Guest buffer of the pending output. Read when the output thread plays it, like the
-    // hardware reads it during playback: Wwise refills its ring slots up to that point.
-    const void* output_src = nullptr;
     std::condition_variable_any output_cv;
     bool output_ready = false;
     bool closing = false;

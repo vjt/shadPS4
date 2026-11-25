@@ -312,7 +312,6 @@ static void AudioOutputThread(std::shared_ptr<PortOut> port, const std::stop_tok
             }
 
             if (port->output_ready) {
-                std::memcpy(port->output_buffer, port->output_src, port->BufferSize());
                 ApplyChannelBalance(port->output_buffer, port->buffer_frames, port->format_info,
                                     port->volume);
                 ApplyMastering(*port);
@@ -838,7 +837,7 @@ s32 PS4_SYSV_ABI sceAudioOutOutput(s32 handle, void* ptr) {
         }
 
         if (ptr != nullptr) {
-            port->output_src = ptr;
+            std::memcpy(port->output_buffer, ptr, port->BufferSize());
             port->output_ready = true;
             samples_sent = port->buffer_frames;
         }
@@ -976,7 +975,7 @@ s32 PS4_SYSV_ABI sceAudioOutOutputs(OrbisAudioOutOutputParam* param, u32 num) {
     // Copy data to all ports
     for (u32 i = 0; i < num; i++) {
         if (param[i].ptr != nullptr) {
-            ports[i]->output_src = param[i].ptr;
+            std::memcpy(ports[i]->output_buffer, param[i].ptr, ports[i]->BufferSize());
             ports[i]->output_ready = true;
         }
     }
