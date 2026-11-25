@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <limits>
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
@@ -62,7 +65,19 @@ void Semaphore::Wait(u64 tick) {
         .pValues = &tick,
     };
 
+    static std::atomic<u64> waits{}, wait_ns{};
+    static std::atomic<s64> last_print{};
+    const auto t0 = std::chrono::steady_clock::now();
     while (instance.GetDevice().waitSemaphores(&wait_info, WAIT_TIMEOUT) != vk::Result::eSuccess) {
+    }
+    const auto t1 = std::chrono::steady_clock::now();
+    ++waits;
+    wait_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+    const s64 now_s =
+        std::chrono::duration_cast<std::chrono::seconds>(t1.time_since_epoch()).count();
+    if (last_print.exchange(now_s) != now_s) {
+        fprintf(stderr, "WAITSTAT waits=%llu wait_ms=%llu\n", (unsigned long long)waits.load(),
+                (unsigned long long)(wait_ns.load() / 1000000));
     }
     Refresh();
 }
