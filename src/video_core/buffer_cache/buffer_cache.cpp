@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <magic_enum/magic_enum.hpp>
 #include <xxhash.h>
 
@@ -115,6 +116,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
 BufferCache::~BufferCache() = default;
 
 void BufferCache::TickFrame() {
+    dma_synced = false;
     if (std::exchange(fault_process_pending, false)) {
         fault_manager->ProcessFaultBuffer();
     }
@@ -322,6 +324,11 @@ void BufferCache::ReadEdgeImagePages(const Image& image) {
 
 void BufferCache::SynchronizeDmaBuffers() {
     fault_process_pending = true;
+    // DIAG (gow-night): SHADPS4_DMA_SYNC_PER_SUBMIT=1 syncs the resident ranges once per submit.
+    static const bool per_frame = std::getenv("SHADPS4_DMA_SYNC_PER_SUBMIT") != nullptr;
+    if (per_frame && std::exchange(dma_synced, true)) {
+        return;
+    }
     for (const auto& range : resident_ranges) {
         const u64 page = range.start >> (ARENA_PAGE_BITS - block_shift);
         const VAddr device_addr = range.start << block_shift;
