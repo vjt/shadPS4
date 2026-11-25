@@ -114,21 +114,31 @@ void Scheduler::Flush() {
     Flush(info);
 }
 
-void Scheduler::Finish() {
+void Scheduler::Finish(std::source_location loc) {
     // When finishing, we need to wait for the submission to have executed on the device.
     const u64 presubmit_tick = CurrentTick();
     SubmitInfo info{};
     SubmitExecution(info);
-    Wait(presubmit_tick);
+    Wait(presubmit_tick, loc);
 }
 
-void Scheduler::Wait(u64 tick) {
+void Scheduler::Wait(u64 tick, std::source_location loc) {
     if (tick >= work_semaphore.CurrentTick()) {
         // Make sure we are not waiting for the current tick without signalling
         SubmitInfo info{};
         Flush(info);
     }
-    work_semaphore.Wait(tick);
+    static thread_local char who[32][96];
+    static thread_local u32 lines[32];
+    u32 i = 0;
+    for (; i < 31 && lines[i] && lines[i] != loc.line(); ++i) {
+    }
+    if (!lines[i]) {
+        lines[i] = loc.line();
+        const char* f = strrchr(loc.file_name(), '/');
+        snprintf(who[i], sizeof(who[i]), "%s:%u", f ? f + 1 : loc.file_name(), loc.line());
+    }
+    work_semaphore.Wait(tick, who[i]);
 }
 
 void Scheduler::PopPendingOperations() {
@@ -268,7 +278,7 @@ void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {
             priority_pending_ops.pop();
         }
 
-        work_semaphore.Wait(op.gpu_tick);
+        work_semaphore.Wait(op.gpu_tick, "async-pending-ops-thread");
         if (stoken.stop_requested()) {
             break;
         }
