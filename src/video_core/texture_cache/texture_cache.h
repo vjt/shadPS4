@@ -4,6 +4,9 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <source_location>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -395,7 +398,16 @@ private:
     void TouchImage(Image& image);
 
     /// Removes image from the cache and schedules it for deletion.
-    void FreeImage(ImageId image_id) {
+    void FreeImage(ImageId image_id,
+                   std::source_location loc = std::source_location::current()) {
+        if (const auto& i = slot_images[image_id].info; i.size.width >= 128) {
+            fprintf(stderr, "FREEIMG %.2f addr=%llx %ux%u fmt=%d line=%u flags=%x\n",
+                    std::chrono::duration<double>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count(),
+                    (unsigned long long)i.guest_address, i.size.width, i.size.height,
+                    (int)i.pixel_format, loc.line(), (unsigned)slot_images[image_id].flags);
+        }
         {
             std::scoped_lock lk{slot_images[image_id].mutex};
             UntrackImage(image_id);
