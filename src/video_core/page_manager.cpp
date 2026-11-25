@@ -5,8 +5,12 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <mutex>
+#include <dlfcn.h>
+#include <execinfo.h>
 #include <string>
 #include <utility>
 #include "common/adaptive_mutex.h"
@@ -467,6 +471,7 @@ static void Page(Slot* s, u64 page) {
     s->pages[low] = page;
     s->hits[low] = 1;
 }
+static void ReportWatch();
 static void Reporter() {
     for (;;) {
         std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -509,6 +514,74 @@ static void Reporter() {
                         flush_ns / 1000, protects, protect_ns / 1000, protect_max / 1000,
                         protect_bytes / 1024, pages);
         }
+        ReportWatch();
+    }
+}
+
+// SHADPS4_DIAG_WATCH=<addr>: backtrace of every protect (not unprotect) covering addr.
+struct Stack {
+    u64 hash;
+    u32 count;
+    int n;
+    void* frames[14];
+};
+static std::mutex watch_mutex;
+static Stack stacks[16];
+static u64 WatchAddr() {
+    static const u64 addr = [] {
+        const char* env = std::getenv("SHADPS4_DIAG_WATCH");
+        return env ? std::strtoull(env, nullptr, 0) : 0ULL;
+    }();
+    return addr;
+}
+static void Watch(VAddr address, size_t size, Core::MemoryPermission perms) {
+    const u64 watch = WatchAddr();
+    if (watch == 0 || perms == Core::MemoryPermission::ReadWrite || watch < address ||
+        watch >= address + size) {
+        return;
+    }
+    Stack st{};
+    st.n = backtrace(st.frames, 14);
+    for (int i = 0; i < st.n; i++) {
+        st.hash = st.hash * 1000003ULL ^ reinterpret_cast<u64>(st.frames[i]);
+    }
+    std::scoped_lock lk{watch_mutex};
+    Stack* low = &stacks[0];
+    for (auto& s : stacks) {
+        if (s.count != 0 && s.hash == st.hash) {
+            s.count++;
+            return;
+        }
+        if (s.count < low->count) {
+            low = &s;
+        }
+    }
+    *low = st;
+    low->count = 1;
+}
+static void ReportWatch() {
+    if (WatchAddr() == 0) {
+        return;
+    }
+    std::scoped_lock lk{watch_mutex};
+    for (auto& s : stacks) {
+        if (s.count == 0) {
+            continue;
+        }
+        std::string frames;
+        for (int i = 0; i < s.n; i++) {
+            Dl_info info{};
+            if (dladdr(s.frames[i], &info) && info.dli_fbase) {
+                frames += fmt::format(" {}+{:#x}", info.dli_fname ? std::strrchr(info.dli_fname, '/') + 1 : "?",
+                                      reinterpret_cast<u64>(s.frames[i]) -
+                                          reinterpret_cast<u64>(info.dli_fbase));
+            } else {
+                frames += fmt::format(" {}", s.frames[i]);
+            }
+        }
+        LOG_WARNING(Render, "DIAG watch {:#x} protects={} stack:{}", WatchAddr(), s.count,
+                    frames);
+        s.count = 0;
     }
 }
 } // namespace Diag
@@ -532,6 +605,7 @@ struct SignalImpl : public PageManager::Impl {
                    "Attempted to protect region as write-only which is not a valid permission");
         const u64 t0 = Diag::Now();
         impl.Protect(address, size, perms);
+        Diag::Watch(address, size, perms);
         if (auto* s = Diag::Mine()) {
             const u64 dt = Diag::Now() - t0;
             s->protects++;
