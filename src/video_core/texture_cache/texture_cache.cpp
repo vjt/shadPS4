@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
@@ -1037,6 +1038,13 @@ void TextureCache::RegisterImage(ImageId image_id) {
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered),
                "Trying to register an already registered image");
     image.flags |= ImageFlagBits::Registered;
+    if (image.info.size.width >= 128) {
+        fprintf(stderr, "NEWIMG %.2f addr=%llx %ux%u fmt=%d\n",
+                std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch())
+                    .count(),
+                (unsigned long long)image.info.guest_address, image.info.size.width,
+                image.info.size.height, (int)image.info.pixel_format);
+    }
     image.memory_usage_counter = &total_used_memory;
     total_used_memory += Common::AlignUp(image.SizeBytes(), 1024);
     image_lru_cache.Insert(image, gc_tick);
