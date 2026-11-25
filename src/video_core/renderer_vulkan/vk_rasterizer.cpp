@@ -850,7 +850,18 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             if (vsharp.base_address == 0 || vsharp.GetSize() == 0) {
                 buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
             } else {
-                const u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
+                u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
+                {
+                    // DIAG (gow-night): SHADPS4_CLAMP_UNBOUNDED=<bytes> caps read-only V# with
+                    // num_records = ~0 (unbounded) to that size.
+                    static const u64 cap = [] {
+                        const char* env = std::getenv("SHADPS4_CLAMP_UNBOUNDED");
+                        return env ? std::strtoull(env, nullptr, 0) : 0ULL;
+                    }();
+                    if (cap != 0 && vsharp.num_records == 0xFFFFFFFFU && !desc.is_written) {
+                        size = std::min(size, cap);
+                    }
+                }
                 if (size != vsharp.GetSize()) {
                     LOG_DEBUG(Render, "Clamped size from {} to {} for stage {:#x}",
                               vsharp.GetSize(), size, stage.pgm_hash);
