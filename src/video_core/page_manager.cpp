@@ -224,6 +224,11 @@ struct PageManager::Impl {
         for (u64 page = page_start; page != page_end; ++page) {
             PageState* state = cached_pages.find(base_page + page);
             if (!state) {
+                if ((write_op != PageOp::None && write_mask.GetPage(page)) ||
+                    (read_op != PageOp::None && read_mask.GetPage(page))) {
+                    LOG_ERROR(Render, "WATCHDBG dropped page={:#x} write_op={} read_op={}",
+                              (base_page + page) << PM_PAGE_BITS, s32(write_op), s32(read_op));
+                }
                 continue;
             }
 
