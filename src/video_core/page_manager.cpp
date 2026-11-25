@@ -2,6 +2,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <string>
 #include <utility>
 #include "common/adaptive_mutex.h"
 #include "common/assert.h"
@@ -412,6 +418,101 @@ public:
 };
 #endif // __linux__
 
+// DIAG (gow-night): which threads fault on tracked pages, and what each fault costs.
+extern thread_local u32 g_diag_flushes;
+namespace Diag {
+struct Slot {
+    std::atomic<long> tid{0};
+    std::atomic<u64> faults{}, fault_ns{}, fault_max_ns{}, reads{}, flushes{}, flush_ns{};
+    std::atomic<u64> protects{}, protect_ns{}, protect_max_ns{}, protect_max_bytes{};
+    u64 pages[8]{};
+    u32 hits[8]{};
+};
+static Slot slots[96];
+static Slot* Mine() {
+    static thread_local Slot* mine = nullptr;
+    if (mine) {
+        return mine;
+    }
+    const long tid = syscall(SYS_gettid);
+    for (auto& s : slots) {
+        long expected = 0;
+        if (s.tid.load() == tid || s.tid.compare_exchange_strong(expected, tid)) {
+            return mine = &s;
+        }
+    }
+    return nullptr;
+}
+static u64 Now() {
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return u64(ts.tv_sec) * 1000000000ULL + u64(ts.tv_nsec);
+}
+static void Max(std::atomic<u64>& m, u64 v) {
+    u64 cur = m.load();
+    while (v > cur && !m.compare_exchange_weak(cur, v)) {
+    }
+}
+static void Page(Slot* s, u64 page) {
+    u32 low = 0;
+    for (u32 i = 0; i < 8; i++) {
+        if (s->pages[i] == page) {
+            s->hits[i]++;
+            return;
+        }
+        if (s->hits[i] < s->hits[low]) {
+            low = i;
+        }
+    }
+    s->pages[low] = page;
+    s->hits[low] = 1;
+}
+static void Reporter() {
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        for (auto& s : slots) {
+            const long tid = s.tid.load();
+            if (tid == 0) {
+                continue;
+            }
+            const u64 faults = s.faults.exchange(0), fault_ns = s.fault_ns.exchange(0);
+            const u64 fault_max = s.fault_max_ns.exchange(0), reads = s.reads.exchange(0);
+            const u64 flushes = s.flushes.exchange(0), flush_ns = s.flush_ns.exchange(0);
+            const u64 protects = s.protects.exchange(0), protect_ns = s.protect_ns.exchange(0);
+            const u64 protect_max = s.protect_max_ns.exchange(0);
+            const u64 protect_bytes = s.protect_max_bytes.exchange(0);
+            if (faults == 0 && protects == 0) {
+                continue;
+            }
+            char comm[32] = "?";
+            char path[64];
+            std::snprintf(path, sizeof(path), "/proc/self/task/%ld/comm", tid);
+            if (FILE* f = std::fopen(path, "r")) {
+                if (std::fgets(comm, sizeof(comm), f)) {
+                    comm[std::strcspn(comm, "\n")] = 0;
+                }
+                std::fclose(f);
+            }
+            std::string pages;
+            for (u32 i = 0; i < 8; i++) {
+                if (s.hits[i] != 0) {
+                    pages += fmt::format(" {:#x}x{}", s.pages[i] << PageManager::PM_PAGE_BITS,
+                                         s.hits[i]);
+                    s.hits[i] = 0;
+                }
+            }
+            LOG_WARNING(Render,
+                        "DIAG fault tid={} comm={} faults={} (reads={}) us[sum,max]=[{},{}] "
+                        "flushes={} flush_us={} protects={} us[sum,max]=[{},{}] max_kb={} "
+                        "pages:{}",
+                        tid, comm, faults, reads, fault_ns / 1000, fault_max / 1000, flushes,
+                        flush_ns / 1000, protects, protect_ns / 1000, protect_max / 1000,
+                        protect_bytes / 1024, pages);
+        }
+    }
+}
+} // namespace Diag
+
 struct SignalImpl : public PageManager::Impl {
     SignalImpl(Vulkan::Rasterizer* rasterizer_) : Impl() {
         rasterizer = rasterizer_;
@@ -420,6 +521,7 @@ struct SignalImpl : public PageManager::Impl {
         constexpr auto priority = std::numeric_limits<u32>::min();
         Core::Signals::Instance()->RegisterAccessViolationHandler(GuestFaultSignalHandler,
                                                                   priority);
+        std::thread(Diag::Reporter).detach();
     }
 
     void Protect(VAddr address, size_t size, Core::MemoryPermission perms) override {
@@ -428,7 +530,15 @@ struct SignalImpl : public PageManager::Impl {
         auto& impl = memory->GetAddressSpace();
         ASSERT_MSG(perms != Core::MemoryPermission::Write,
                    "Attempted to protect region as write-only which is not a valid permission");
+        const u64 t0 = Diag::Now();
         impl.Protect(address, size, perms);
+        if (auto* s = Diag::Mine()) {
+            const u64 dt = Diag::Now() - t0;
+            s->protects++;
+            s->protect_ns += dt;
+            Diag::Max(s->protect_max_ns, dt);
+            Diag::Max(s->protect_max_bytes, size);
+        }
     }
 
     static bool GuestFaultSignalHandler(void* context, void* fault_address) {
@@ -436,12 +546,24 @@ struct SignalImpl : public PageManager::Impl {
         const auto size = std::min<u64>(8, PageManager::GetNextPageAddr(addr) - addr);
         const auto is_gpu_thread =
             std::this_thread::get_id() == rasterizer->GetGpuCommandProcessorThread();
-        if (Common::IsWriteError(context)) {
-            return rasterizer->InvalidateMemory(addr, size, is_gpu_thread);
-        } else {
-            return rasterizer->ReadMemory(addr, size, is_gpu_thread);
+        const u64 t0 = Diag::Now();
+        const u32 flushes0 = g_diag_flushes;
+        const bool is_write = Common::IsWriteError(context);
+        const bool ret = is_write ? rasterizer->InvalidateMemory(addr, size, is_gpu_thread)
+                                  : rasterizer->ReadMemory(addr, size, is_gpu_thread);
+        if (auto* s = Diag::Mine(); s && ret) {
+            const u64 dt = Diag::Now() - t0;
+            s->faults++;
+            s->reads += is_write ? 0 : 1;
+            s->fault_ns += dt;
+            Diag::Max(s->fault_max_ns, dt);
+            if (g_diag_flushes != flushes0) {
+                s->flushes++;
+                s->flush_ns += dt;
+            }
+            Diag::Page(s, addr >> PageManager::PM_PAGE_BITS);
         }
-        return false;
+        return ret;
     }
 };
 

@@ -120,8 +120,11 @@ void BufferCache::TickFrame() {
     }
 }
 
+thread_local u32 g_diag_flushes; // DIAG (gow-night)
+
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
     memory_tracker->InvalidateRegion(device_addr, size, [this, device_addr, size, assume_locks] {
+        g_diag_flushes++;
         ReadMemory(device_addr, size, true, false, assume_locks);
     });
 }
