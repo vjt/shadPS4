@@ -141,6 +141,8 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
                 }
             }
             memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+            // The GPU data still reaches the guest, a little later and without a wait
+            ReadMemory(device_addr, size, false, true, assume_locks);
             return;
         }
         ReadMemory(device_addr, size, true, false, assume_locks);
@@ -213,12 +215,39 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
     const auto write_data = [this, arena_base, device_addr, size, download, async,
                              copies = std::move(copies)] {
         download.Invalidate();
+        static const bool nowait = std::getenv("RB_NOWAIT") != nullptr;
         for (const auto& copy : copies) {
             auto* dst_addr = std::bit_cast<u8*>(arena_base + copy.srcOffset);
-            memory->TryWriteBacking(dst_addr, download.mapped + (copy.dstOffset - download.offset),
-                                    copy.size);
+            u8* src = download.mapped + (copy.dstOffset - download.offset);
+            if (nowait && async) {
+                // Where the CPU wrote since the snapshot its data wins; elsewhere the GPU data
+                // lands in the guest page and in the snapshot
+                std::scoped_lock lk{snapshot_mutex};
+                const VAddr begin = arena_base + copy.srcOffset;
+                for (VAddr page = Common::AlignDown(begin, 4_KB); page < begin + copy.size;
+                     page += 4_KB) {
+                    const auto it = page_snapshots.find(page);
+                    if (it == page_snapshots.end()) {
+                        continue;
+                    }
+                    const VAddr from = std::max(page, begin);
+                    const VAddr to = std::min<VAddr>(page + 4_KB, begin + copy.size);
+                    u8* snapshot = it->second.get();
+                    for (VAddr addr = from; addr < to; ++addr) {
+                        const u8 guest = *std::bit_cast<const u8*>(addr);
+                        if (guest == snapshot[addr - page]) {
+                            snapshot[addr - page] = src[addr - begin];
+                        } else {
+                            src[addr - begin] = guest;
+                        }
+                    }
+                }
+            }
+            memory->TryWriteBacking(dst_addr, src, copy.size);
         }
-        memory_tracker->UnmarkRegionAsGpuModified(device_addr, size, false);
+        if (!(nowait && async)) {
+            memory_tracker->UnmarkRegionAsGpuModified(device_addr, size, false);
+        }
 
         if (async) {
             staging_pool.FreeDeferred(download);
