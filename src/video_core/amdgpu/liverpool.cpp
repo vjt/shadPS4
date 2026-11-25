@@ -3,6 +3,7 @@
 
 #include <boost/preprocessor/stringize.hpp>
 
+#include <vector>
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/polyfill_thread.h"
@@ -727,6 +728,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
             }
             case PM4ItOpcode::EventWriteEos: {
                 const auto* event_eos = reinterpret_cast<const PM4CmdEventWriteEos*>(header);
+                if (rasterizer && event_eos->command != PM4CmdEventWriteEos::Command::GdsStore &&
+                    rasterizer->DeferFence([eos = *event_eos] {
+                        eos.SignalFence([](void* address, u64 data, u32 num_bytes) {
+                            Core::Memory::Instance()->TryWriteBacking(address, &data, num_bytes);
+                        });
+                    })) {
+                    break;
+                }
                 if (rasterizer) {
                     rasterizer->OnFence();
                 }
@@ -746,6 +755,19 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
             }
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
+                if (rasterizer && rasterizer->DeferFence([eop = *event_eop] {
+                        eop.SignalFence(
+                            [](void* address, u64 data, u32 num_bytes) {
+                                Core::Memory::Instance()->TryWriteBacking(address, &data,
+                                                                          num_bytes);
+                            },
+                            [] {
+                                Platform::IrqC::Instance()->Signal(
+                                    Platform::InterruptId::GfxEop);
+                            });
+                    })) {
+                    break;
+                }
                 if (rasterizer) {
                     rasterizer->OnFence();
                 }
@@ -800,6 +822,16 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 const u32 data_size = (header->type3.count.Value() - 2) * 4;
                 u64* address = write_data->Address<u64*>();
                 if (!write_data->wr_one_addr.Value()) {
+                    if (rasterizer &&
+                        rasterizer->DeferFence(
+                            [address, data = std::vector<u8>(
+                                          reinterpret_cast<const u8*>(write_data->data),
+                                          reinterpret_cast<const u8*>(write_data->data) +
+                                              data_size)] {
+                                std::memcpy(address, data.data(), data.size());
+                            })) {
+                        break;
+                    }
                     if (rasterizer) {
                         rasterizer->OnFence();
                     }

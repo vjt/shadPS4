@@ -425,6 +425,10 @@ void Rasterizer::OnSubmit() {
     runtime.TickFrame();
 }
 
+bool Rasterizer::DeferFence(std::function<void()>&& signal) {
+    return texture_cache.DeferFence(std::move(signal));
+}
+
 void Rasterizer::OnFence() {
     texture_cache.ProcessDownloadImages(true);
 }

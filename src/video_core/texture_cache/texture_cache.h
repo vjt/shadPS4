@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -135,6 +137,10 @@ public:
 
     /// Schedules a copy of pending images for download back to CPU memory.
     void ProcessDownloadImages(bool at_fence = false);
+
+    /// Queues the linear image downloads and runs signal once the GPU has done them, without
+    /// waiting. Returns false when nothing is outstanding: the caller signals right away.
+    bool DeferFence(std::function<void()>&& signal);
 
     /// Retrieves the image handle of the image with the provided attributes.
     [[nodiscard]] ImageId FindImage(ImageDesc& desc, bool exact_fmt = false);
@@ -429,6 +435,8 @@ private:
     Common::LRUCache<Sampler> sampler_lru_cache;
     const bool readback_linear_images;
     std::mutex download_images_mutex;
+    std::atomic<u32> outstanding_fences{};
+    u64 last_fence_tick{};
     absl::flat_hash_map<VAddr, MetaDataInfo> surface_metas;
 };
 DECLARE_ENUM_FLAG_OPERATORS(TextureCache::DownloadMemoryFlags)
