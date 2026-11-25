@@ -426,7 +426,7 @@ void Rasterizer::OnSubmit() {
 }
 
 void Rasterizer::OnFence() {
-    texture_cache.ProcessDownloadImages();
+    texture_cache.ProcessDownloadImages(true);
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {

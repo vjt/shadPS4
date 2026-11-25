@@ -95,12 +95,24 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
 
 TextureCache::~TextureCache() = default;
 
-void TextureCache::ProcessDownloadImages() {
+void TextureCache::ProcessDownloadImages(bool at_fence) {
+    static const char* mode = getenv("RB_IMG_ASYNC");
+    static u64 calls[2], busy[2];
     std::unique_lock lk{download_images_mutex};
+    ++calls[at_fence];
+    busy[at_fence] += !download_images.empty();
+    if ((calls[0] + calls[1]) % 2000 == 0) {
+        fprintf(stderr, "IMGSTAT submit=%llu/%llu fence=%llu/%llu\n", (unsigned long long)busy[0],
+                (unsigned long long)calls[0], (unsigned long long)busy[1],
+                (unsigned long long)calls[1]);
+    }
+    if (mode && mode[0] == 'f' && !at_fence) {
+        return;
+    }
     if (download_images.empty()) {
         return;
     }
-    static const bool img_async = getenv("RB_IMG_ASYNC") != nullptr;
+    const bool img_async = mode && mode[0] == '1';
     static absl::flat_hash_set<u64> seen;
     for (const ImageId image_id : download_images) {
         const auto& info = slot_images[image_id].info;
