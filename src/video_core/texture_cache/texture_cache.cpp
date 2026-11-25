@@ -148,10 +148,18 @@ void TextureCache::ProcessDownloadImages(bool at_fence) {
     if (mode && mode[0] == 'f' && !at_fence) {
         return;
     }
+    const bool frame_sync = mode && mode[0] == 's';
+    if (frame_sync && !at_fence && outstanding_fences != 0) {
+        // The downloads of this frame land before the next one starts.
+        scheduler.Wait(last_fence_tick);
+        while (outstanding_fences != 0) {
+            std::this_thread::yield();
+        }
+    }
     if (download_images.empty()) {
         return;
     }
-    const bool img_async = mode && mode[0] == '1';
+    const bool img_async = mode && (mode[0] == '1' || (frame_sync && at_fence));
     static absl::flat_hash_set<u64> seen;
     for (const ImageId image_id : download_images) {
         const auto& info = slot_images[image_id].info;
@@ -166,6 +174,11 @@ void TextureCache::ProcessDownloadImages(bool at_fence) {
     }
     download_images.clear();
     if (img_async) {
+        if (frame_sync) {
+            last_fence_tick = scheduler.CurrentTick();
+            ++outstanding_fences;
+            scheduler.DeferPriorityOperation([this] { --outstanding_fences; });
+        }
         scheduler.Flush();
         return;
     }
