@@ -876,7 +876,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                                         "DIAG watch-bind n={} shader={:#x} stage={} type={} base={:#x} "
                                         "size={:#x} raw={:#x} stride={} records={} written={} "
                                         "formatted={}",
-                                        n, stage.pgm_hash, u32(stage.stage), u32(desc.buffer_type),
+                                        n, stage.pgm_hash, u32(stage.sw_stage), u32(desc.buffer_type),
                                         vsharp.base_address, size, vsharp.GetSize(),
                                         vsharp.GetStride(), vsharp.num_records, desc.is_written,
                                         desc.is_formatted);
