@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <xxhash.h>
 
@@ -98,10 +100,24 @@ void TextureCache::ProcessDownloadImages() {
     if (download_images.empty()) {
         return;
     }
+    static const bool img_async = getenv("RB_IMG_ASYNC") != nullptr;
+    static absl::flat_hash_set<u64> seen;
     for (const ImageId image_id : download_images) {
-        DownloadImageMemory(image_id);
+        const auto& info = slot_images[image_id].info;
+        if (seen.size() < 64 && seen.emplace(info.guest_address ^ info.guest_size).second) {
+            fprintf(stderr, "IMGDL addr=%llx %ux%u size=%u fmt=%d tiled=%d\n",
+                    (unsigned long long)info.guest_address, info.size.width, info.size.height,
+                    (unsigned)info.guest_size, (int)info.pixel_format,
+                    (int)info.props.is_tiled);
+        }
+        DownloadImageMemory(image_id,
+                            img_async ? DownloadMemoryFlags::Priority : DownloadMemoryFlags::None);
     }
     download_images.clear();
+    if (img_async) {
+        scheduler.Flush();
+        return;
+    }
     scheduler.Finish();
     scheduler.PopPendingOperations();
 }
