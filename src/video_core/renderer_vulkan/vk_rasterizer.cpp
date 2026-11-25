@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <map>
+#include <tuple>
 #include "common/debug.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -858,6 +861,27 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 }
                 if (desc.is_formatted) {
                     flags |= VideoCore::ObtainBufferFlags::IsTexelBuffer;
+                }
+                {
+                    // DIAG (gow-night): which binding covers SHADPS4_DIAG_WATCH.
+                    static const u64 watch = [] {
+                        const char* env = std::getenv("SHADPS4_DIAG_WATCH");
+                        return env ? std::strtoull(env, nullptr, 0) : 0ULL;
+                    }();
+                    static std::map<std::tuple<u64, u64, u64>, u64> seen;
+                    if (watch >= vsharp.base_address && watch < vsharp.base_address + size) {
+                        auto& n = seen[{stage.pgm_hash, vsharp.base_address, size}];
+                        if ((n++ & (n - 1)) == 0) {
+                            LOG_WARNING(Render,
+                                        "DIAG watch-bind n={} shader={:#x} stage={} type={} base={:#x} "
+                                        "size={:#x} raw={:#x} stride={} records={} written={} "
+                                        "formatted={}",
+                                        n, stage.pgm_hash, u32(stage.stage), u32(desc.buffer_type),
+                                        vsharp.base_address, size, vsharp.GetSize(),
+                                        vsharp.GetStride(), vsharp.num_records, desc.is_written,
+                                        desc.is_formatted);
+                        }
+                    }
                 }
                 const auto [buffer, offset] =
                     buffer_cache.ObtainBuffer(vsharp.base_address, size, flags);
