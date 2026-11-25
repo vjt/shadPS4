@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <magic_enum/magic_enum.hpp>
 #include <xxhash.h>
 
@@ -207,8 +209,26 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
     if (async) {
         scheduler.DeferOperation(std::move(write_data));
     } else {
+        static u64 n = 0, bytes = 0, ns = 0, ncopies = 0;
+        static auto last = std::chrono::steady_clock::now();
+        const auto t0 = std::chrono::steady_clock::now();
         scheduler.Finish();
         write_data();
+        const auto t1 = std::chrono::steady_clock::now();
+        n++;
+        bytes += total_size_bytes;
+        ncopies += copies.size();
+        ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+        if (n <= 400) {
+            fprintf(stderr, "RBDL addr=%llx size=%llx bytes=%llu\n", (unsigned long long)device_addr,
+                    (unsigned long long)size, (unsigned long long)total_size_bytes);
+        }
+        if (t1 - last >= std::chrono::seconds(1)) {
+            fprintf(stderr, "RBSTAT downloads=%llu copies=%llu bytes=%llu wait_ms=%llu\n",
+                    (unsigned long long)n, (unsigned long long)ncopies, (unsigned long long)bytes,
+                    (unsigned long long)(ns / 1000000));
+            last = t1;
+        }
     }
 }
 
