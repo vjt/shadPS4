@@ -496,7 +496,7 @@ static void Reporter() {
             std::string pages;
             for (u32 i = 0; i < 8; i++) {
                 if (s.hits[i] != 0) {
-                    pages += fmt::format(" {:#x}x{}", s.pages[i] << PageManager::PM_PAGE_BITS,
+                    pages += fmt::format(" {:#x}x{}", s.pages[i] << 12,
                                          s.hits[i]);
                     s.hits[i] = 0;
                 }
