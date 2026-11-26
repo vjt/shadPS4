@@ -168,7 +168,7 @@ struct PassInfo {
     std::unordered_map<u32, IR::Inst*> vn_to_inst;
 
     // Bumped during codegen to assign offsets to readconsts
-    u16 dst_off_dw;
+    u32 dst_off_dw;
 
     PtrUserList* GetUsesAsPointer(IR::Inst* inst) {
         auto it = pointer_uses.find(inst);
@@ -192,18 +192,22 @@ namespace Shader::Optimization {
 
 namespace {
 
-static inline u16 GetFlatbufOffset(const IR::Inst* inst) {
+static inline u32 GetFlatbufOffset(const IR::Inst* inst) {
     if (inst->GetOpcode() == IR::Opcode::ReadConstBuffer) {
         auto inst_info = inst->Flags<IR::BufferInstInfo>();
         return inst_info.flatbuf_off_dw;
     }
     if (inst->GetOpcode() == IR::Opcode::ReadConst) {
-        return inst->Flags<u16>();
+        return inst->Flags<u32>();
     }
     UNREACHABLE_MSG("Instruction not supported");
 }
 
-static inline void SetFlatbufOffset(IR::Inst* inst, u16 offset) {
+static inline bool IsStaticFlatbufOffset(u32 offset) {
+    return offset != 0 && (offset & IR::ReadConstDynamicWindow) == 0;
+}
+
+static inline void SetFlatbufOffset(IR::Inst* inst, u32 offset) {
     if (inst->GetOpcode() == IR::Opcode::ReadConstBuffer) {
         auto inst_info = inst->Flags<IR::BufferInstInfo>();
         inst_info.flatbuf_off_dw.Assign(offset);
@@ -518,7 +522,8 @@ static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& p
         return true;
     case IR::Opcode::ReadConst:
     case IR::Opcode::ReadConstBuffer:
-        if (u16 offset = GetFlatbufOffset(pass_info.DeduplicateInstruction(inst)); offset != 0) {
+        if (u32 offset = GetFlatbufOffset(pass_info.DeduplicateInstruction(inst));
+            IsStaticFlatbufOffset(offset)) {
             c.mov(reg, ptr[rsi + (offset << 2)]);
             return true;
         }
@@ -587,7 +592,8 @@ static inline void PopPtr(Xbyak::CodeGenerator& c) {
 
 static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& pass_info,
                          Xbyak::CodeGenerator& c) {
-    if (subtree->GetOpcode() == IR::Opcode::ReadConst && subtree->Flags<u16>() == 0 ||
+    if (subtree->GetOpcode() == IR::Opcode::ReadConst &&
+            !IsStaticFlatbufOffset(subtree->Flags<u32>()) ||
         subtree->GetOpcode() == IR::Opcode::ReadConstBuffer &&
             subtree->Flags<IR::BufferInstInfo>().flatbuf_off_dw == 0) {
         return;
@@ -605,12 +611,33 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
     // flattened buffer.
     // TODO src and dst are contiguous. Optimize with wider loads/stores
     // TODO if this subtree is dynamically indexed, don't compact it (keep it sparse)
+    u32 window_off_dw = 0;
     for (auto [src_off_dw, use] : *use_list) {
         if (src_off_dw.IsImmediate()) {
             c.mov(r10d, ptr[rdi + (src_off_dw.U32() << 2)]);
         } else {
             if (!ComputeOffset(c, r10d, pass_info, src_off_dw)) {
-                LOG_ERROR(Render_Recompiler, "Failed to compute offset for SRT walker");
+                if (use->GetOpcode() != IR::Opcode::ReadConst ||
+                    EmulatorSettings.IsDirectMemoryAccessEnabled() ||
+                    pass_info.dst_off_dw + IR::ReadConstDynamicWindowSize > 0xFFFF) {
+                    LOG_ERROR(Render_Recompiler, "Failed to compute offset for SRT walker");
+                    continue;
+                }
+                // The offset is only known in the shader: copy a window of the pointed data and
+                // let the shader index it.
+                if (window_off_dw == 0) {
+                    window_off_dw = pass_info.dst_off_dw;
+                    pass_info.dst_off_dw += IR::ReadConstDynamicWindowSize;
+                    Xbyak::Label copy;
+                    c.xor_(ecx, ecx);
+                    c.L(copy);
+                    c.mov(r10d, ptr[rdi + rcx * 4]);
+                    c.mov(ptr[rsi + rcx * 4 + (window_off_dw << 2)], r10d);
+                    c.inc(ecx);
+                    c.cmp(ecx, IR::ReadConstDynamicWindowSize);
+                    c.jb(copy);
+                }
+                SetFlatbufOffset(use, window_off_dw | IR::ReadConstDynamicWindow);
                 continue;
             }
             c.shl(r10d, 2);

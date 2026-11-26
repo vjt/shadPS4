@@ -49,6 +49,10 @@ union TextureInstInfo {
     BitField<16, 16, u32> pc;
 };
 
+/// ReadConst flag: the flatbuf offset is the start of a window indexed by the dynamic offset.
+constexpr u32 ReadConstDynamicWindow = 1u << 31;
+constexpr u32 ReadConstDynamicWindowSize = 1024;
+
 union BufferInstInfo {
     u64 raw;
     BitField<0, 1, u64> index_enable;
