@@ -57,7 +57,8 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
       slot_image_views{MAX_IMAGE_VIEWS}, slot_samplers{MAX_SAMPLERS},
       blit_helper{instance, scheduler},
       tile_manager{instance, scheduler, runtime, buffer_cache.GetStreamBuffer()},
-      readback_linear_images{EmulatorSettings.IsReadbackLinearImagesEnabled()} {
+      readback_linear_images{EmulatorSettings.IsReadbackLinearImagesEnabled()},
+      readback_linear_images_deferred{EmulatorSettings.IsReadbackLinearImagesDeferred()} {
 
     u32 max_samplers = instance.GetMaxSamplerAllocationCount();
     trigger_gc_samplers = max_samplers * 3 / 4;
@@ -93,17 +94,24 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
 
 TextureCache::~TextureCache() = default;
 
-void TextureCache::ProcessDownloadImages() {
+void TextureCache::ProcessDownloadImages(bool is_submit) {
     std::unique_lock lk{download_images_mutex};
-    if (download_images.empty()) {
+    if (!download_images.empty()) {
+        for (const ImageId image_id : download_images) {
+            DownloadImageMemory(image_id);
+        }
+        download_images.clear();
+        download_tick = scheduler.CurrentTick();
+        if (readback_linear_images_deferred && !is_submit) {
+            scheduler.Flush();
+        }
+    }
+    if (!download_tick || (readback_linear_images_deferred && !is_submit)) {
         return;
     }
-    for (const ImageId image_id : download_images) {
-        DownloadImageMemory(image_id);
-    }
-    download_images.clear();
-    scheduler.Finish();
+    scheduler.Wait(*download_tick);
     scheduler.PopPendingOperations();
+    download_tick.reset();
 }
 
 void TextureCache::DownloadImageMemory(ImageId image_id, DownloadMemoryFlags flags) {

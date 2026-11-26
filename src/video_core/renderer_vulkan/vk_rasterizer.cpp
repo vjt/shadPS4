@@ -419,13 +419,13 @@ void Rasterizer::Finish() {
 
 void Rasterizer::OnSubmit() {
     buffer_cache.TickFrame();
-    texture_cache.ProcessDownloadImages();
+    texture_cache.ProcessDownloadImages(true);
     texture_cache.RunGarbageCollector();
     runtime.TickFrame();
 }
 
 void Rasterizer::OnFence() {
-    texture_cache.ProcessDownloadImages();
+    texture_cache.ProcessDownloadImages(false);
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {
