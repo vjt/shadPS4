@@ -719,6 +719,22 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     image.tick_accessed_last = scheduler.CurrentTick();
     TouchImage(image);
 
+    if (image.info.size.width != info.size.width || image.info.size.height != info.size.height) {
+        static int shown = 0;
+        if (shown < 400 && view_mip <= 0) {
+            ++shown;
+            fmt::print(stderr,
+                       "FINDMISMATCH addr={:x} req={}x{} pitch={} lv={} gsz={:x} got={}x{} pitch={} "
+                       "lv={} gsz={:x} gotaddr={:x} fmt={} gotfmt={} binding={} tick={}\n",
+                       info.guest_address, info.size.width, info.size.height, info.pitch,
+                       info.resources.levels, info.guest_size, image.info.size.width,
+                       image.info.size.height, image.info.pitch, image.info.resources.levels,
+                       image.info.guest_size, image.info.guest_address,
+                       vk::to_string(info.pixel_format), vk::to_string(image.info.pixel_format),
+                       static_cast<int>(desc.type), scheduler.CurrentTick());
+        }
+    }
+
     // If the image requested is a subresource of the image from cache record its location.
     if (view_mip > 0) {
         desc.view_info.range.base.level = view_mip;
