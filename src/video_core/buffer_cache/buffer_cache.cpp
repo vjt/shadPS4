@@ -34,19 +34,38 @@ struct DbgEv {
 constexpr u32 DBG_RING = 1 << 16;
 DbgEv g_dbg_ring[DBG_RING];
 std::atomic<u32> g_dbg_pos{0};
+// Write faults flood: they get a ring of their own
+DbgEv g_dbg_cring[DBG_RING];
+std::atomic<u32> g_dbg_cpos{0};
+std::atomic<u64> g_dbg_tick{0};
 void DbgAdd(char kind, u64 addr, u64 size, u64 tick) {
+    if (tick) {
+        g_dbg_tick = tick;
+    } else {
+        tick = g_dbg_tick;
+    }
+    if (kind == 'C') {
+        g_dbg_cring[g_dbg_cpos.fetch_add(1) % DBG_RING] = {kind, addr, size, tick, 0};
+        return;
+    }
     g_dbg_ring[g_dbg_pos.fetch_add(1) % DBG_RING] = {kind, addr, size, tick, g_dbg_pgm};
 }
 void DbgDump(u64 addr, u64 size) {
     const u64 lo = addr & ~0xfffULL, hi = (addr + size + 0xfff) & ~0xfffULL;
-    const u32 pos = g_dbg_pos.load();
-    for (u32 i = 0; i < DBG_RING; ++i) {
-        const auto& e = g_dbg_ring[(pos + i) % DBG_RING];
-        if (e.kind && e.addr < hi && e.addr + e.size > lo) {
-            fprintf(stderr, "  HIST %c addr=%llx size=%llu tick=%llu pgm=%llx\n", e.kind,
-                    (unsigned long long)e.addr, (unsigned long long)e.size,
-                    (unsigned long long)e.tick, (unsigned long long)e.pgm);
+    for (const auto* ring : {g_dbg_ring, g_dbg_cring}) {
+        const u32 pos = ring == g_dbg_ring ? g_dbg_pos.load() : g_dbg_cpos.load();
+        u32 shown = 0;
+        for (u32 i = 0; i < DBG_RING; ++i) {
+            const auto& e = ring[(pos + i) % DBG_RING];
+            if (e.kind && e.addr < hi && e.addr + e.size > lo && ++shown <= 40) {
+                fprintf(stderr, "  HIST %c addr=%llx size=%llu tick=%llu pgm=%llx\n", e.kind,
+                        (unsigned long long)e.addr, (unsigned long long)e.size,
+                        (unsigned long long)e.tick, (unsigned long long)e.pgm);
+            }
         }
+        const auto& old = ring[pos % DBG_RING];
+        fprintf(stderr, "  HISTSPAN %c oldest_tick=%llu shown=%u\n", ring == g_dbg_ring ? 'E' : 'C',
+                (unsigned long long)old.tick, shown);
     }
 }
 void DbgMaps(u64 addr) {
