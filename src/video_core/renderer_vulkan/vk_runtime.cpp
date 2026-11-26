@@ -349,17 +349,13 @@ VideoCore::ImageView& Runtime::FindSubrectView(VideoCore::Image& image,
                           vk::AccessFlagBits2::eTransferWrite, vk::PipelineStageFlagBits2::eCopy);
         FlushBarriers();
 
-        SmallVector<vk::ImageCopy, 8> copies;
-        for (u32 mip = 0; mip < create_info.mipLevels; ++mip) {
-            copies.push_back({
-                .srcSubresource = {vk::ImageAspectFlagBits::eColor, mip, 0, 1},
-                .dstSubresource = {vk::ImageAspectFlagBits::eColor, mip, 0, 1},
-                .extent = {std::max(create_info.extent.width >> mip, 1u),
-                           std::max(create_info.extent.height >> mip, 1u), 1},
-            });
-        }
+        const vk::ImageCopy copy{
+            .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+            .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+            .extent = create_info.extent,
+        };
         scheduler.CommandBuffer().copyImage(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
-                                            crop.image, vk::ImageLayout::eTransferDstOptimal, copies);
+                                            crop.image, vk::ImageLayout::eTransferDstOptimal, copy);
 
         // A full-size view can already be bound in the same draw.
         if (image.binding.is_bound && source_state.layout != vk::ImageLayout::eUndefined) {
