@@ -379,6 +379,24 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
             cache_image.info.resources.levels == 1 && image_info.resources.layers == 1 &&
             cache_image.info.resources.layers == 1;
 
+        // Same layout, larger extent: grow the image, smaller requests are subrects of it.
+        if (image_info.pitch == cache_image.info.pitch &&
+            image_info.guest_size <= cache_image.info.guest_size &&
+            image_info.pixel_format == cache_image.info.pixel_format &&
+            image_info.type == AmdGpu::ImageType::Color2D && image_info.type == cache_image.info.type &&
+            image_info.tile_mode == cache_image.info.tile_mode &&
+            image_info.resources.levels <= cache_image.info.resources.levels &&
+            image_info.resources.layers == 1 && cache_image.info.resources.layers == 1 &&
+            !image_info.props.is_depth && !image_info.props.is_block &&
+            image_info.size.depth == 1 && cache_image.info.size.depth == 1 &&
+            (image_info.size.width > cache_image.info.size.width ||
+             image_info.size.height > cache_image.info.size.height)) {
+            auto grown_info = cache_image.info;
+            grown_info.size.width = std::max(image_info.size.width, cache_image.info.size.width);
+            grown_info.size.height = std::max(image_info.size.height, cache_image.info.size.height);
+            return {ExpandImage(grown_info, cache_image_id), -1, -1};
+        }
+
         // Size and resources are less than or equal, use image view.
         if (image_info.pixel_format != cache_image.info.pixel_format ||
             image_info.guest_size <= cache_image.info.guest_size || guest_size_only) {
