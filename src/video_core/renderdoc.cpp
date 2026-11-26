@@ -7,6 +7,7 @@
 #include "video_core/renderdoc.h"
 
 #include <atomic>
+#include <cstdlib>
 #include <renderdoc_app.h>
 
 #ifdef _WIN32
@@ -107,6 +108,8 @@ void LoadRenderDoc() {
     }
 }
 
+static int frames_left = 1;
+
 void StartCapture() {
     if (!rdoc_api) {
         return;
@@ -125,12 +128,14 @@ void EndCapture() {
 
     if (capture_state == CaptureState::InProgress) {
         rdoc_api->EndFrameCapture(nullptr, nullptr);
-        capture_state = CaptureState::Idle;
+        capture_state = frames_left-- > 1 ? CaptureState::Triggered : CaptureState::Idle;
     }
 }
 
 void TriggerCapture() {
     if (capture_state == CaptureState::Idle) {
+        const char* n = std::getenv("RDOC_FRAMES");
+        frames_left = n ? std::atoi(n) : 1;
         capture_state = CaptureState::Triggered;
     }
 }
