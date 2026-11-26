@@ -313,6 +313,9 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
     if (info.uses_group_vote) {
         ctx.AddCapability(spv::Capability::GroupNonUniformVote);
     }
+    if (info.uses_group_arithmetic) {
+        ctx.AddCapability(spv::Capability::GroupNonUniformArithmetic);
+    }
     if (info.uses_shader_clock) {
         if (ctx.profile.supports_shader_subgroup_clock) {
             ctx.AddExtension("SPV_KHR_shader_clock");
