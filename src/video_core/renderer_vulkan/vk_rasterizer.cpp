@@ -28,6 +28,8 @@ extern u64 g_dbg_pgm;
 extern bool g_dbg_watch;
 
 void DbgEvent(char kind, u64 addr, u64 size);
+int DbgPageWatchers(u64 addr);
+void DbgDumpPage(u64 addr);
 
 namespace Vulkan {
 
@@ -1478,6 +1480,22 @@ void Rasterizer::MapMemory(VAddr addr, u64 size) {
     {
         std::scoped_lock lock{mapped_ranges_mutex};
         mapped_ranges += decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
+    }
+    // A new mapping comes up writable: drop the page watchers left on the range while it was
+    // unmapped, or the pages stay unprotected with a watcher count that says otherwise.
+    buffer_cache.MapMemory(addr, size);
+    texture_cache.InvalidateMemory(addr, size);
+    for (VAddr a = addr; a < addr + size; a += 4096) {
+        if (const int w = DbgPageWatchers(a); w > 0) {
+            static std::atomic<u32> seen{0};
+            if (seen++ < 40) {
+                fprintf(stderr, "STALEAFTER map=%llx size=%llu page=%llx w=%d\n",
+                        (unsigned long long)addr, (unsigned long long)size,
+                        (unsigned long long)a, w);
+                DbgDumpPage(a);
+            }
+            break;
+        }
     }
 }
 
