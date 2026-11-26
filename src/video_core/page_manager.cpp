@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <cstdio>
 #include <algorithm>
 #include <utility>
 #include "common/adaptive_mutex.h"
@@ -36,6 +38,7 @@
 #endif
 
 void DbgEvent(char kind, u64 addr, u64 size);
+void DbgDumpPage(u64 addr);
 
 namespace VideoCore {
 
@@ -480,6 +483,29 @@ int PageManager::DbgWatchers(u64 addr) {
 }
 
 void PageManager::OnGpuMap(VAddr address, size_t size) {
+    // test: watcher counts that outlive the mapping they protected
+    {
+        static std::atomic<u32> seen{0};
+        u32 pages = 0;
+        VAddr first = 0;
+        int w = 0;
+        for (VAddr a = address; a < address + size; a += PM_PAGE_SIZE) {
+            const auto* st = impl->cached_pages.find(a >> PM_PAGE_BITS);
+            if (st && st->num_write_watchers > 0) {
+                if (!pages++) {
+                    first = a;
+                    w = st->num_write_watchers;
+                }
+            }
+        }
+        if (pages && seen++ < 60) {
+            fprintf(stderr, "STALEWATCH map=%llx size=%llu pages=%u first=%llx w=%d\n",
+                    (unsigned long long)address, (unsigned long long)size, pages,
+                    (unsigned long long)first, w);
+            DbgDumpPage(first);
+            fflush(stderr);
+        }
+    }
     impl->OnMap(address, size);
 }
 

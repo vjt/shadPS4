@@ -102,6 +102,9 @@ void DbgMaps(u64 addr) {
     fclose(f);
 }
 } // namespace
+void DbgDumpPage(u64 addr) {
+    DbgDump(addr, 1);
+}
 // M map, X unmap, P guest mprotect, C CPU write fault
 void DbgEvent(char kind, u64 addr, u64 size) {
     DbgAdd(kind, addr, size, 0);
