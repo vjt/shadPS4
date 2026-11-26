@@ -49,7 +49,11 @@ public:
         const size_t end_l1_page = end_page >> L2_BITS;
         for (size_t l1_page = start_l1_page; l1_page <= end_l1_page; ++l1_page) {
             if (!top_level[l1_page]) {
-                top_level[l1_page] = page_alloc.Create();
+                top_lock.lock();
+                if (!top_level[l1_page]) {
+                    top_level[l1_page] = page_alloc.Create();
+                }
+                top_lock.unlock();
             }
         }
     }
