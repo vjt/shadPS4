@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstdio>
 #include <vector>
 #include "common/object_pool.h"
 #include "common/spin_lock.h"
@@ -49,7 +51,7 @@ public:
         const size_t end_l1_page = end_page >> L2_BITS;
         for (size_t l1_page = start_l1_page; l1_page <= end_l1_page; ++l1_page) {
             if (!top_level[l1_page]) {
-                top_level[l1_page] = page_alloc.Create();
+                top_level[l1_page] = DbgCreate(l1_page, "reserve");
             }
         }
     }
@@ -73,7 +75,7 @@ public:
         if (NULL_CHECK && !top_level[l1_page]) [[unlikely]] {
             top_lock.lock();
             if (!top_level[l1_page]) {
-                top_level[l1_page] = page_alloc.Create();
+                top_level[l1_page] = DbgCreate(l1_page, "operator[]");
             }
             top_lock.unlock();
         }
@@ -81,6 +83,23 @@ public:
     }
 
 private:
+    L1Page* DbgCreate(size_t l1_page, const char* who) {
+        const int others = dbg_creating.fetch_add(1);
+        L1Page* page = page_alloc.Create();
+        const bool filled = top_level[l1_page] != nullptr;
+        dbg_creating.fetch_sub(1);
+        const int n = dbg_creates.fetch_add(1) + 1;
+        if (others != 0 || filled) {
+            std::fprintf(stderr, "RESERVERACE who=%s l1=%zu concurrent_creates=%d slot_filled=%d\n",
+                         who, l1_page, others, int(filled));
+        } else if ((n & (n - 1)) == 0) {
+            std::fprintf(stderr, "RESERVESTAT creates=%d last=%s\n", n, who);
+        }
+        return page;
+    }
+
+    std::atomic<int> dbg_creating{0};
+    std::atomic<int> dbg_creates{0};
     std::vector<L1Page*> top_level{};
     mutable Common::SpinLock top_lock{};
     Common::ObjectPool<L1Page> page_alloc;
