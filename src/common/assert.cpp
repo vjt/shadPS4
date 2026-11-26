@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <utility>
 #include "common/arch.h"
 #include "common/assert.h"
 #include "core/signals.h"
@@ -14,7 +15,12 @@
 #error "Missing Crash() implementation for target CPU architecture."
 #endif
 
+void (*g_assert_hook)() = nullptr;
+
 void assert_fail_impl() {
+    if (auto* hook = std::exchange(g_assert_hook, nullptr)) {
+        hook();
+    }
     Core::Signals::Instance()->RemoveHandlers();
     Common::Singleton<Core::Emulator>::Instance()->Shutdown();
     Crash();

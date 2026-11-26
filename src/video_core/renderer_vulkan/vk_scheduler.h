@@ -415,6 +415,10 @@ public:
         return work_semaphore.CurrentTick();
     }
 
+    [[nodiscard]] u64 KnownGpuTick() const noexcept {
+        return work_semaphore.KnownGpuTick();
+    }
+
     /// Returns true when a tick has been triggered by the GPU.
     [[nodiscard]] bool IsFree(u64 tick) noexcept {
         if (work_semaphore.IsFree(tick)) {

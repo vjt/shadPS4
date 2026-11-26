@@ -1,4 +1,5 @@
 #include <cstdio>
+extern void (*g_assert_hook)();
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -781,9 +782,68 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
     return true;
 }
 
+namespace {
+struct CntRec {
+    u64 tick;
+    u64 a[2];
+    u64 off[2];
+    const u8* p[2];
+    s32 val[2];
+    bool reported;
+};
+constexpr u32 CNT_RING = 512;
+CntRec g_cnt_ring[CNT_RING];
+u32 g_cnt_pos;
+u32 g_cnt_arena;
+CntRec* g_cnt_cur;
+Scheduler* g_cnt_sched;
+
+void CntCheck() {
+    for (auto& r : g_cnt_ring) {
+        if (r.reported) {
+            continue;
+        }
+        for (int k = 0; k < 2; ++k) {
+            if (!r.p[k]) {
+                continue;
+            }
+            const s32 now = *reinterpret_cast<const s32*>(r.p[k]);
+            if (now != r.val[k]) {
+                r.reported = true;
+                fprintf(stderr, "CLOBBER k=%d tick=%llu off=%llx was=%d now=%d free=%d cur=%llu\n", k,
+                        (unsigned long long)r.tick, (unsigned long long)r.off[k], r.val[k], now,
+                        int(g_cnt_sched->IsFree(r.tick)),
+                        (unsigned long long)g_cnt_sched->CurrentTick());
+            }
+        }
+    }
+}
+
+void CntDump() {
+    fprintf(stderr, "CNTDUMP cur=%llu known=%llu\n",
+            (unsigned long long)g_cnt_sched->CurrentTick(),
+            (unsigned long long)g_cnt_sched->KnownGpuTick());
+    for (u32 i = 0; i < CNT_RING; ++i) {
+        const auto& r = g_cnt_ring[(g_cnt_pos + i) % CNT_RING];
+        if (!r.tick) {
+            continue;
+        }
+        fprintf(stderr, "CNTREC tick=%llu", (unsigned long long)r.tick);
+        for (int k = 0; k < 2; ++k) {
+            fprintf(stderr, " a%d=%llx off=%llx stream=%d was=%d now=%d", k,
+                    (unsigned long long)r.a[k], (unsigned long long)r.off[k], int(r.p[k] != nullptr),
+                    r.val[k], r.p[k] ? *reinterpret_cast<const s32*>(r.p[k]) : -1);
+        }
+        fprintf(stderr, "\n");
+    }
+    fflush(stderr);
+}
+} // namespace
+
 void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                              Shader::PushData& push_data) {
     const u64 alignment = instance.StorageMinAlignment();
+    g_cnt_cur = nullptr;
     if (stage.hw_stage == Shader::HwStage::Fragment && stage.buffers.size() == 3 &&
         stage.images.size() == 8 && !stage.buffers[1].IsSpecial() &&
         !stage.buffers[2].IsSpecial()) {
@@ -791,19 +851,14 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
         const auto b2 = stage.buffers[2].GetSharp(stage);
         if (b1.base_address != 0 && b1.GetSize() >= 0x28 && b2.base_address != 0 &&
             b2.GetSize() >= 4) {
-            const s32 steps = *reinterpret_cast<const s32*>(b1.base_address + 0x24);
-            const s32 lights = *reinterpret_cast<const s32*>(b2.base_address);
-            static u64 calls;
-            const bool bad = steps < 0 || steps > 512 || lights < 0 || lights > 512;
-            if (bad || calls++ % 20000 == 0) {
-                fprintf(stderr,
-                        "%s pgm=%llx steps=%d lights=%d a1=%llx s1=%u gm1=%d a2=%llx s2=%u gm2=%d\n",
-                        bad ? "BADCOUNT" : "COUNT", (unsigned long long)stage.pgm_hash, steps,
-                        lights, (unsigned long long)b1.base_address, (unsigned)b1.GetSize(),
-                        (int)buffer_cache.IsRegionGpuModified(b1.base_address, b1.GetSize()),
-                        (unsigned long long)b2.base_address, (unsigned)b2.GetSize(),
-                        (int)buffer_cache.IsRegionGpuModified(b2.base_address, b2.GetSize()));
-            }
+            g_cnt_sched = &scheduler;
+            g_assert_hook = &CntDump;
+            CntCheck();
+            g_cnt_cur = &g_cnt_ring[g_cnt_pos++ % CNT_RING];
+            *g_cnt_cur = {};
+            g_cnt_cur->tick = scheduler.CurrentTick();
+            g_cnt_cur->a[0] = b1.base_address;
+            g_cnt_cur->a[1] = b2.base_address;
         }
     }
     for (const auto& desc : stage.buffers) {
@@ -894,6 +949,34 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 if (adjust % 4 != 0) {
                     LOG_WARNING(Render_Vulkan, "Buffer binding in shader {:#x} isn't dword aligned",
                                 stage.pgm_hash);
+                }
+                if (g_cnt_cur) {
+                    const size_t idx = &desc - stage.buffers.data();
+                    if (idx == 1 || idx == 2) {
+                        const size_t k = idx - 1;
+                        const u32 at = k == 0 ? 0x24 : 0;
+                        const s32 guest = *reinterpret_cast<const s32*>(vsharp.base_address + at);
+                        auto& sb = buffer_cache.GetStreamBuffer();
+                        g_cnt_cur->off[k] = offset;
+                        g_cnt_cur->val[k] = guest;
+                        if (buffer == &sb) {
+                            g_cnt_cur->p[k] = sb.mapped_data.data() + offset + at;
+                            g_cnt_cur->val[k] = *reinterpret_cast<const s32*>(g_cnt_cur->p[k]);
+                        } else if (g_cnt_arena++ < 100) {
+                            fprintf(stderr, "COUNTARENA k=%zu tick=%llu addr=%llx size=%llu guest=%d\n",
+                                    k, (unsigned long long)g_cnt_cur->tick,
+                                    (unsigned long long)vsharp.base_address,
+                                    (unsigned long long)size, guest);
+                        }
+                        const s32 v = g_cnt_cur->val[k];
+                        if (v < 0 || v > 512 || v != guest) {
+                            fprintf(stderr,
+                                    "BADCOPY k=%zu tick=%llu addr=%llx copied=%d guest=%d stream=%d\n",
+                                    k, (unsigned long long)g_cnt_cur->tick,
+                                    (unsigned long long)vsharp.base_address, v, guest,
+                                    int(buffer == &sb));
+                        }
+                    }
                 }
                 push_data.AddOffset(binding.buffer, adjust);
                 buffer_infos.emplace_back(buffer->Handle(), offset_aligned, size + adjust);
