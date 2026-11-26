@@ -27,6 +27,8 @@ extern void (*g_assert_hook)();
 extern u64 g_dbg_pgm;
 extern bool g_dbg_watch;
 
+void DbgEvent(char kind, u64 addr, u64 size);
+
 namespace Vulkan {
 
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
@@ -1471,7 +1473,6 @@ bool Rasterizer::IsMapped(VAddr addr, u64 size) {
     return boost::icl::contains(mapped_ranges, range);
 }
 
-void DbgEvent(char kind, u64 addr, u64 size);
 void Rasterizer::MapMemory(VAddr addr, u64 size) {
     DbgEvent('M', addr, size);
     {
