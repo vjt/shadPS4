@@ -1,5 +1,4 @@
 #include <cstdio>
-extern void (*g_assert_hook)();
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -23,6 +22,10 @@ extern void (*g_assert_hook)();
 #include "video_core/texture_cache/texture_cache.h"
 
 #include <vulkan/vulkan_format_traits.hpp>
+
+extern void (*g_assert_hook)();
+extern u64 g_dbg_pgm;
+extern bool g_dbg_watch;
 
 namespace Vulkan {
 
@@ -844,6 +847,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                              Shader::PushData& push_data) {
     const u64 alignment = instance.StorageMinAlignment();
     g_cnt_cur = nullptr;
+    g_dbg_pgm = stage.pgm_hash;
     if (stage.hw_stage == Shader::HwStage::Fragment && stage.buffers.size() == 3 &&
         stage.images.size() == 8 && !stage.buffers[1].IsSpecial() &&
         !stage.buffers[2].IsSpecial()) {
@@ -942,8 +946,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 if (desc.is_formatted) {
                     flags |= VideoCore::ObtainBufferFlags::IsTexelBuffer;
                 }
+                g_dbg_watch = g_cnt_cur && (&desc - stage.buffers.data()) >= 1;
                 const auto [buffer, offset] =
                     buffer_cache.ObtainBuffer(vsharp.base_address, size, flags);
+                g_dbg_watch = false;
                 const u64 offset_aligned = Common::AlignDown(offset, alignment);
                 const u64 adjust = offset - offset_aligned;
                 if (adjust % 4 != 0) {

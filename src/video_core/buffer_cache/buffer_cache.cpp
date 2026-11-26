@@ -21,6 +21,36 @@
 
 #include <vk_mem_alloc.h>
 
+#include <atomic>
+#include <cstdio>
+// test/dg-counts: history of what touched a page, printed when the watched shader binds through the arena
+u64 g_dbg_pgm = 0;
+bool g_dbg_watch = false;
+namespace {
+struct DbgEv {
+    char kind; // W written bind, D download range, F flush request from a CPU fault, U upload range
+    u64 addr, size, tick, pgm;
+};
+constexpr u32 DBG_RING = 1 << 16;
+DbgEv g_dbg_ring[DBG_RING];
+std::atomic<u32> g_dbg_pos{0};
+void DbgAdd(char kind, u64 addr, u64 size, u64 tick) {
+    g_dbg_ring[g_dbg_pos.fetch_add(1) % DBG_RING] = {kind, addr, size, tick, g_dbg_pgm};
+}
+void DbgDump(u64 addr, u64 size) {
+    const u64 lo = addr & ~0xfffULL, hi = (addr + size + 0xfff) & ~0xfffULL;
+    const u32 pos = g_dbg_pos.load();
+    for (u32 i = 0; i < DBG_RING; ++i) {
+        const auto& e = g_dbg_ring[(pos + i) % DBG_RING];
+        if (e.kind && e.addr < hi && e.addr + e.size > lo) {
+            fprintf(stderr, "  HIST %c addr=%llx size=%llu tick=%llu pgm=%llx\n", e.kind,
+                    (unsigned long long)e.addr, (unsigned long long)e.size,
+                    (unsigned long long)e.tick, (unsigned long long)e.pgm);
+        }
+    }
+}
+} // namespace
+
 namespace VideoCore {
 
 static constexpr size_t GDS_BUFFER_SIZE = 64_KB;
@@ -122,6 +152,7 @@ void BufferCache::TickFrame() {
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
     memory_tracker->InvalidateRegion(device_addr, size, [this, device_addr, size, assume_locks] {
+        DbgAdd('F', device_addr, size, scheduler.CurrentTick());
         ReadMemory(device_addr, size, true, false, assume_locks);
     });
 }
@@ -164,6 +195,7 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
     const VAddr arena_base = arena->cpu_addr;
     memory_tracker->ForEachDownloadRange<false>(device_addr, size, [&](u64 address, u64 size) {
         const auto add_download = [&](VAddr start, VAddr end) {
+            DbgAdd(async ? 'd' : 'D', start, end - start, scheduler.CurrentTick());
             const u64 new_offset = start - arena_base;
             const u64 new_size = end - start;
             copies.push_back(vk::BufferCopy{
@@ -232,9 +264,39 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     if (is_written) {
         texture_cache.MarkAsMaybeGpuDirty(device_addr, size);
     }
+    if (is_written) {
+        DbgAdd('W', device_addr, size, scheduler.CurrentTick());
+    }
+    static u32 dbg_seen;
+    const bool dbg = g_dbg_watch && !is_written && dbg_seen < 12;
+    const bool dbg_cpu = dbg && IsRegionCpuModified(device_addr, size);
     SynchronizeMemory(arena, device_addr, size, is_written, is_texel_buffer);
     if (is_written) {
         gpu_modified_ranges.Add(device_addr, size);
+    }
+    if (dbg) {
+        ++dbg_seen;
+        u32 ranges = 0;
+        gpu_modified_ranges.ForEachInRange(device_addr, size, [&](VAddr, VAddr) { ++ranges; });
+        fprintf(stderr, "ARENABIND addr=%llx size=%u tick=%llu cpu_modified_before=%d gpu_ranges_in=%u guest0=%d\n",
+                (unsigned long long)device_addr, size, (unsigned long long)scheduler.CurrentTick(),
+                int(dbg_cpu), ranges, *reinterpret_cast<const s32*>(device_addr));
+        DbgDump(device_addr, size);
+        fflush(stderr);
+        if (dbg_seen <= 2) {
+            // What the GPU would read: bring the arena bytes back (breaks the frame, the run is lost anyway)
+            const auto dl = staging_pool.Request(64, VideoCore::MemoryType::HostCached, 16, false);
+            boost::container::small_vector<vk::BufferCopy, 1> c;
+            c.push_back(vk::BufferCopy{arena->Offset(device_addr), dl.offset, 64});
+            runtime.CopyBuffer(arena, dl.buffer, c);
+            scheduler.Finish();
+            dl.Invalidate();
+            const auto* v = reinterpret_cast<const s32*>(dl.mapped);
+            fprintf(stderr, "ARENADATA addr=%llx arena0=%d %d %d %d guest0=%d\n",
+                    (unsigned long long)device_addr, v[0], v[1], v[2], v[3],
+                    *reinterpret_cast<const s32*>(device_addr));
+            fflush(stderr);
+        }
     }
     return {arena, arena->Offset(device_addr)};
 }
@@ -452,6 +514,7 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
     boost::container::small_vector<vk::BufferCopy, 4> copies;
     size_t total_size_bytes{};
     memory_tracker->ForEachUploadRange(device_addr, size, is_written, [&](u64 addr, u64 size) {
+        DbgAdd(is_written ? 'u' : 'U', addr, size, scheduler.CurrentTick());
         copies.emplace_back(total_size_bytes, addr, size);
         total_size_bytes += size;
     });
