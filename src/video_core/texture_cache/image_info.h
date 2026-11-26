@@ -62,7 +62,7 @@ struct ImageInfo {
                size.width <= info.size.width && size.height <= info.size.height &&
                size.depth == 1 && info.size.depth == 1 && guest_address == info.guest_address &&
                guest_size <= info.guest_size && type == AmdGpu::ImageType::Color2D &&
-               type == info.type && resources.levels == info.resources.levels &&
+               type == info.type && resources.levels <= info.resources.levels &&
                resources.layers == 1 && info.resources.layers == 1 && !props.is_depth &&
                !info.props.is_depth && !props.is_block && !info.props.is_block &&
                pixel_format == info.pixel_format && num_bits == info.num_bits &&
