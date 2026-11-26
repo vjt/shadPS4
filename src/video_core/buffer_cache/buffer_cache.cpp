@@ -37,6 +37,9 @@ std::atomic<u32> g_dbg_pos{0};
 // Write faults flood: they get a ring of their own
 DbgEv g_dbg_cring[DBG_RING];
 std::atomic<u32> g_dbg_cpos{0};
+// mprotect calls of the page manager: t/T texture cache, b/B buffer tracker, lower case = writable
+DbgEv g_dbg_pring[DBG_RING];
+std::atomic<u32> g_dbg_ppos{0};
 std::atomic<u64> g_dbg_tick{0};
 void DbgAdd(char kind, u64 addr, u64 size, u64 tick) {
     if (tick) {
@@ -48,26 +51,40 @@ void DbgAdd(char kind, u64 addr, u64 size, u64 tick) {
         g_dbg_cring[g_dbg_cpos.fetch_add(1) % DBG_RING] = {kind, addr, size, tick, 0};
         return;
     }
+    if (kind == 't' || kind == 'T' || kind == 'b' || kind == 'B') {
+        g_dbg_pring[g_dbg_ppos.fetch_add(1) % DBG_RING] = {kind, addr, size, tick, g_dbg_pgm};
+        return;
+    }
     g_dbg_ring[g_dbg_pos.fetch_add(1) % DBG_RING] = {kind, addr, size, tick, g_dbg_pgm};
 }
 void DbgDump(u64 addr, u64 size) {
     const u64 lo = addr & ~0xfffULL, hi = (addr + size + 0xfff) & ~0xfffULL;
-    for (const auto* ring : {g_dbg_ring, g_dbg_cring}) {
-        const u32 pos = ring == g_dbg_ring ? g_dbg_pos.load() : g_dbg_cpos.load();
+    for (const auto* ring : {g_dbg_ring, g_dbg_cring, g_dbg_pring}) {
+        const u32 pos = ring == g_dbg_ring    ? g_dbg_pos.load()
+                        : ring == g_dbg_cring ? g_dbg_cpos.load()
+                                              : g_dbg_ppos.load();
+        u32 total = 0;
+        for (u32 i = 0; i < DBG_RING; ++i) {
+            const auto& e = ring[i];
+            total += e.kind && e.addr < hi && e.addr + e.size > lo;
+        }
         u32 shown = 0;
         for (u32 i = 0; i < DBG_RING; ++i) {
             const auto& e = ring[(pos + i) % DBG_RING];
-            if (e.kind && e.addr < hi && e.addr + e.size > lo && ++shown <= 40) {
+            if (e.kind && e.addr < hi && e.addr + e.size > lo && ++shown + 40 > total) {
                 fprintf(stderr, "  HIST %c addr=%llx size=%llu tick=%llu pgm=%llx\n", e.kind,
                         (unsigned long long)e.addr, (unsigned long long)e.size,
                         (unsigned long long)e.tick, (unsigned long long)e.pgm);
             }
         }
         const auto& old = ring[pos % DBG_RING];
-        fprintf(stderr, "  HISTSPAN %c oldest_tick=%llu shown=%u\n", ring == g_dbg_ring ? 'E' : 'C',
+        fprintf(stderr, "  HISTSPAN %c oldest_tick=%llu shown=%u\n", ring == g_dbg_ring ? 'E' : ring == g_dbg_cring ? 'C' : 'P',
                 (unsigned long long)old.tick, shown);
     }
 }
+} // namespace
+int DbgPageWatchers(u64 addr);
+namespace {
 void DbgMaps(u64 addr) {
     FILE* f = fopen("/proc/self/maps", "r");
     if (!f) {
@@ -323,6 +340,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
                 int(dbg_cpu), ranges, *reinterpret_cast<const s32*>(device_addr));
         DbgDump(device_addr, size);
         DbgMaps(device_addr);
+        fprintf(stderr, "  WATCHERS %d\n", DbgPageWatchers(device_addr));
         fflush(stderr);
         if (dbg_seen <= 2) {
             // What the GPU would read: bring the arena bytes back (breaks the frame, the run is lost anyway)

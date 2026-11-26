@@ -60,6 +60,8 @@ public:
         return PM_PAGE_SIZE;
     }
 
+    static int DbgWatchers(u64 addr);
+
 private:
     friend struct UffdImpl;
     friend struct SignalImpl;

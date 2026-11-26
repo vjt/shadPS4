@@ -35,6 +35,8 @@
 #include "common/spin_lock.h"
 #endif
 
+void DbgEvent(char kind, u64 addr, u64 size);
+
 namespace VideoCore {
 
 struct PageManager::Impl {
@@ -92,6 +94,7 @@ struct PageManager::Impl {
     static constexpr size_t NUM_ADDRESS_PAGES = 1ULL << (40 - PM_PAGE_BITS);
     static constexpr size_t NUM_ADDRESS_LOCKS = NUM_ADDRESS_PAGES / NUM_REGION_PAGES;
     inline static Vulkan::Rasterizer* rasterizer;
+    inline static Impl* dbg_self;
 
     Impl() = default;
     virtual ~Impl() = default;
@@ -126,6 +129,8 @@ struct PageManager::Impl {
 
         const auto release_pending = [&] {
             if (range_pages > 0) {
+                DbgEvent(True(perms & Core::MemoryPermission::Write) ? 't' : 'T',
+                         range_begin << PM_PAGE_BITS, range_pages << PM_PAGE_BITS);
                 Protect(range_begin << PM_PAGE_BITS, range_pages << PM_PAGE_BITS, perms);
                 range_pages = 0;
                 potential_pages = 0;
@@ -203,6 +208,8 @@ struct PageManager::Impl {
 
         const auto release_pending = [&] {
             if (range_pages > 0) {
+                DbgEvent(True(perms & Core::MemoryPermission::Write) ? 'b' : 'B',
+                         range_begin << PM_PAGE_BITS, range_pages << PM_PAGE_BITS);
                 Protect(range_begin << PM_PAGE_BITS, range_pages << PM_PAGE_BITS, perms);
                 range_pages = 0;
                 potential_pages = 0;
@@ -461,9 +468,16 @@ PageManager::PageManager(Vulkan::Rasterizer* rasterizer_) {
     LOG_INFO(Config, "Memory tracking method: signals");
 #endif
     impl = std::make_unique<SignalImpl>(rasterizer_);
+    Impl::dbg_self = impl.get();
 }
 
 PageManager::~PageManager() = default;
+
+int PageManager::DbgWatchers(u64 addr) {
+    auto* self = Impl::dbg_self;
+    auto* st = self ? self->cached_pages.find(addr >> PM_PAGE_BITS) : nullptr;
+    return st ? st->num_write_watchers : -1;
+}
 
 void PageManager::OnGpuMap(VAddr address, size_t size) {
     impl->OnMap(address, size);
@@ -485,3 +499,7 @@ void PageManager::UpdatePageWatchersForRegion(VAddr base_addr, const Bounds& bou
 }
 
 } // namespace VideoCore
+
+int DbgPageWatchers(u64 addr) {
+    return VideoCore::PageManager::DbgWatchers(addr);
+}
