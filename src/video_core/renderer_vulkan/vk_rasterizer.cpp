@@ -1,3 +1,4 @@
+#include <cstdio>
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -783,6 +784,28 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
 void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                              Shader::PushData& push_data) {
     const u64 alignment = instance.StorageMinAlignment();
+    if (stage.hw_stage == Shader::HwStage::Fragment && stage.buffers.size() == 3 &&
+        stage.images.size() == 8 && !stage.buffers[1].IsSpecial() &&
+        !stage.buffers[2].IsSpecial()) {
+        const auto b1 = stage.buffers[1].GetSharp(stage);
+        const auto b2 = stage.buffers[2].GetSharp(stage);
+        if (b1.base_address != 0 && b1.GetSize() >= 0x28 && b2.base_address != 0 &&
+            b2.GetSize() >= 4) {
+            const s32 steps = *reinterpret_cast<const s32*>(b1.base_address + 0x24);
+            const s32 lights = *reinterpret_cast<const s32*>(b2.base_address);
+            static u64 calls;
+            const bool bad = steps < 0 || steps > 512 || lights < 0 || lights > 512;
+            if (bad || calls++ % 20000 == 0) {
+                fprintf(stderr,
+                        "%s pgm=%llx steps=%d lights=%d a1=%llx s1=%u gm1=%d a2=%llx s2=%u gm2=%d\n",
+                        bad ? "BADCOUNT" : "COUNT", (unsigned long long)stage.pgm_hash, steps,
+                        lights, (unsigned long long)b1.base_address, (unsigned)b1.GetSize(),
+                        (int)buffer_cache.IsRegionGpuModified(b1.base_address, b1.GetSize()),
+                        (unsigned long long)b2.base_address, (unsigned)b2.GetSize(),
+                        (int)buffer_cache.IsRegionGpuModified(b2.base_address, b2.GetSize()));
+            }
+        }
+    }
     for (const auto& desc : stage.buffers) {
         const auto src_access =
             vk::AccessFlagBits2::eShaderRead |
