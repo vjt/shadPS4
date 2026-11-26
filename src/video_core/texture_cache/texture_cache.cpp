@@ -389,31 +389,24 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
             cache_image.info.resources.levels == 1 && image_info.resources.layers == 1 &&
             cache_image.info.resources.layers == 1;
 
-        // Same address, single level and layer, other dimensions and pitch: a pool slot reused for
-        // another render target size (dynamic resolution), not a view of the cached image.
-        if (image_info.resources.levels == 1 && cache_image.info.resources.levels == 1 &&
-            image_info.resources.layers == 1 && cache_image.info.resources.layers == 1 &&
-            image_info.size.depth == 1 && cache_image.info.size.depth == 1 &&
-            image_info.pitch != cache_image.info.pitch &&
-            (image_info.size.width != cache_image.info.size.width ||
-             image_info.size.height != cache_image.info.size.height)) {
-            static const bool no_fix = std::getenv("NO_DYNRES_FIX") != nullptr;
-            static int shown = 0;
-            if (shown < 300) {
-                ++shown;
-                fmt::print(stderr, "DYNALIAS addr={:x} req={}x{} pitch={} cached={}x{} pitch={} fmt={} "
-                           "binding={} tick={} fix={}\n", image_info.guest_address,
-                           image_info.size.width, image_info.size.height, image_info.pitch,
-                           cache_image.info.size.width, cache_image.info.size.height,
-                           cache_image.info.pitch, vk::to_string(image_info.pixel_format),
-                           static_cast<int>(binding), scheduler.CurrentTick(), !no_fix);
-            }
-            if (!no_fix) {
-                if (safe_to_delete) {
-                    FreeImage(cache_image_id);
-                }
-                return {merged_image_id, -1, -1};
-            }
+        // Same surface layout, larger extent: a pool slot reused for a bigger render target
+        // (dynamic resolution). Grow the image, smaller requests are subrects of it.
+        if (image_info.pitch == cache_image.info.pitch &&
+            image_info.guest_size == cache_image.info.guest_size &&
+            image_info.pixel_format == cache_image.info.pixel_format &&
+            image_info.type == AmdGpu::ImageType::Color2D && image_info.type == cache_image.info.type &&
+            image_info.tile_mode == cache_image.info.tile_mode &&
+            image_info.resources.levels == cache_image.info.resources.levels &&
+            cache_image.info.resources.layers == 1 &&
+            image_info.resources.layers == 1 && !image_info.props.is_depth &&
+            !image_info.props.is_block && image_info.size.depth == 1 &&
+            cache_image.info.size.depth == 1 &&
+            (image_info.size.width > cache_image.info.size.width ||
+             image_info.size.height > cache_image.info.size.height)) {
+            auto grown_info = image_info;
+            grown_info.size.width = std::max(image_info.size.width, cache_image.info.size.width);
+            grown_info.size.height = std::max(image_info.size.height, cache_image.info.size.height);
+            return {ExpandImage(grown_info, cache_image_id), -1, -1};
         }
 
         // Size and resources are less than or equal, use image view.
@@ -721,7 +714,11 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
 
     if (image.info.size.width != info.size.width || image.info.size.height != info.size.height) {
         static int shown = 0;
-        if (shown < 400 && view_mip <= 0) {
+        const bool subrect = info.size.width <= image.info.size.width &&
+                             info.size.height <= image.info.size.height &&
+                             info.pitch == image.info.pitch &&
+                             (desc.type != BindingType::Texture || info.IsSubrectOf(image.info));
+        if (shown < 400 && view_mip <= 0 && !subrect) {
             ++shown;
             fmt::print(stderr,
                        "FINDMISMATCH addr={:x} req={}x{} pitch={} lv={} gsz={:x} got={}x{} pitch={} "
