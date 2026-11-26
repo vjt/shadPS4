@@ -710,7 +710,11 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
 
     if (image.info.size.width != info.size.width || image.info.size.height != info.size.height) {
         static int shown = 0;
-        if (shown < 400 && view_mip <= 0) {
+        const bool subrect = info.size.width <= image.info.size.width &&
+                             info.size.height <= image.info.size.height &&
+                             info.pitch == image.info.pitch &&
+                             (desc.type != BindingType::Texture || info.IsSubrectOf(image.info));
+        if (shown < 400 && view_mip <= 0 && !subrect) {
             ++shown;
             fmt::print(stderr,
                        "FINDMISMATCH addr={:x} req={}x{} pitch={} lv={} gsz={:x} got={}x{} pitch={} "
