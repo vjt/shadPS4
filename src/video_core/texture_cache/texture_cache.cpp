@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <limits>
+#include <fmt/format.h>
 #include <xxhash.h>
 
 #include "common/assert.h"
@@ -386,6 +388,33 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
             image_info.pitch == cache_image.info.pitch && image_info.resources.levels == 1 &&
             cache_image.info.resources.levels == 1 && image_info.resources.layers == 1 &&
             cache_image.info.resources.layers == 1;
+
+        // Same address, single level and layer, other dimensions and pitch: a pool slot reused for
+        // another render target size (dynamic resolution), not a view of the cached image.
+        if (image_info.resources.levels == 1 && cache_image.info.resources.levels == 1 &&
+            image_info.resources.layers == 1 && cache_image.info.resources.layers == 1 &&
+            image_info.size.depth == 1 && cache_image.info.size.depth == 1 &&
+            image_info.pitch != cache_image.info.pitch &&
+            (image_info.size.width != cache_image.info.size.width ||
+             image_info.size.height != cache_image.info.size.height)) {
+            static const bool no_fix = std::getenv("NO_DYNRES_FIX") != nullptr;
+            static int shown = 0;
+            if (shown < 300) {
+                ++shown;
+                fmt::print(stderr, "DYNALIAS addr={:x} req={}x{} pitch={} cached={}x{} pitch={} fmt={} "
+                           "binding={} tick={} fix={}\n", image_info.guest_address,
+                           image_info.size.width, image_info.size.height, image_info.pitch,
+                           cache_image.info.size.width, cache_image.info.size.height,
+                           cache_image.info.pitch, vk::to_string(image_info.pixel_format),
+                           static_cast<int>(binding), scheduler.CurrentTick(), !no_fix);
+            }
+            if (!no_fix) {
+                if (safe_to_delete) {
+                    FreeImage(cache_image_id);
+                }
+                return {merged_image_id, -1, -1};
+            }
+        }
 
         // Size and resources are less than or equal, use image view.
         if (image_info.pixel_format != cache_image.info.pixel_format ||
