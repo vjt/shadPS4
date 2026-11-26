@@ -212,10 +212,6 @@ s32 ImageInfo::MipOf(const ImageInfo& info) const {
         return -1;
     }
 
-    if (info.array_mode != array_mode) {
-        return -1;
-    }
-
     // Currently we expect only one level to be copied.
     if (resources.levels != 1) {
         return -1;
@@ -240,6 +236,13 @@ s32 ImageInfo::MipOf(const ImageInfo& info) const {
     }
 
     if (mip < 0) {
+        return -1;
+    }
+
+    // Small mips of a macro tiled image fall back to micro tiling.
+    const bool degraded_mip =
+        (info.micro_tiled_mips >> mip) & 1 && !AmdGpu::IsMacroTiled(array_mode);
+    if (info.array_mode != array_mode && !degraded_mip) {
         return -1;
     }
 
