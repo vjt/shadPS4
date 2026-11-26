@@ -14,6 +14,8 @@
 #include "core/memory.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
+void DbgEvent(char kind, u64 addr, u64 size);
+
 namespace Core {
 
 MemoryManager::MemoryManager() {
@@ -1138,6 +1140,7 @@ s64 MemoryManager::ProtectBytes(VAddr addr, VirtualMemoryArea& vma_base, u64 siz
 
     // Perform address-space memory protections if needed.
     if (new_prot != old_prot) {
+        DbgEvent('P', addr, adjusted_size);
         impl.Protect(addr, adjusted_size, perms);
     }
 

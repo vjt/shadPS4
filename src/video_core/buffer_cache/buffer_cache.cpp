@@ -49,7 +49,27 @@ void DbgDump(u64 addr, u64 size) {
         }
     }
 }
+void DbgMaps(u64 addr) {
+    FILE* f = fopen("/proc/self/maps", "r");
+    if (!f) {
+        return;
+    }
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        unsigned long long lo, hi;
+        char perms[8];
+        if (sscanf(line, "%llx-%llx %7s", &lo, &hi, perms) == 3 && addr >= lo && addr < hi) {
+            fprintf(stderr, "  MAPS %llx-%llx %s\n", lo, hi, perms);
+            break;
+        }
+    }
+    fclose(f);
+}
 } // namespace
+// M map, X unmap, P guest mprotect, C CPU write fault
+void DbgEvent(char kind, u64 addr, u64 size) {
+    DbgAdd(kind, addr, size, 0);
+}
 
 namespace VideoCore {
 
@@ -151,6 +171,7 @@ void BufferCache::TickFrame() {
 }
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
+    DbgAdd('C', device_addr, size, 0);
     memory_tracker->InvalidateRegion(device_addr, size, [this, device_addr, size, assume_locks] {
         DbgAdd('F', device_addr, size, scheduler.CurrentTick());
         ReadMemory(device_addr, size, true, false, assume_locks);
@@ -282,6 +303,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
                 (unsigned long long)device_addr, size, (unsigned long long)scheduler.CurrentTick(),
                 int(dbg_cpu), ranges, *reinterpret_cast<const s32*>(device_addr));
         DbgDump(device_addr, size);
+        DbgMaps(device_addr);
         fflush(stderr);
         if (dbg_seen <= 2) {
             // What the GPU would read: bring the arena bytes back (breaks the frame, the run is lost anyway)
@@ -292,9 +314,10 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
             scheduler.Finish();
             dl.Invalidate();
             const auto* v = reinterpret_cast<const s32*>(dl.mapped);
-            fprintf(stderr, "ARENADATA addr=%llx arena0=%d %d %d %d guest0=%d\n",
-                    (unsigned long long)device_addr, v[0], v[1], v[2], v[3],
-                    *reinterpret_cast<const s32*>(device_addr));
+            const auto* g = reinterpret_cast<const s32*>(device_addr);
+            fprintf(stderr, "ARENADATA addr=%llx arena0=%d %d %d %d guest0=%d %d %d %d\n",
+                    (unsigned long long)device_addr, v[0], v[1], v[2], v[3], g[0], g[1], g[2],
+                    g[3]);
             fflush(stderr);
         }
     }
