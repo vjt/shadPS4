@@ -54,6 +54,12 @@ Id EmitGetUserData(EmitContext& ctx, IR::ScalarReg reg) {
 
 Id EmitReadConst(EmitContext& ctx, IR::Inst* inst, Id addr, Id offset) {
     const u32 flatbuf_off_dw = inst->Flags<u32>();
+    if (flatbuf_off_dw & IR::ReadConstDynamicWindow) {
+        const Id index{
+            ctx.OpUMin(ctx.U32[1], offset, ctx.ConstU32(IR::ReadConstDynamicWindowSize - 1))};
+        const Id window{ctx.ConstU32(flatbuf_off_dw & ~IR::ReadConstDynamicWindow)};
+        return ctx.EmitFlatbufferLoad(ctx.OpIAdd(ctx.U32[1], window, index));
+    }
     if (!EmulatorSettings.IsDirectMemoryAccessEnabled() || !ctx.profile.support_bda) {
         return ctx.EmitFlatbufferLoad(ctx.ConstU32(flatbuf_off_dw));
     }
